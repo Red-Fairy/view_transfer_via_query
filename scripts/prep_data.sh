@@ -1,23 +1,35 @@
 #!/usr/bin/env bash
+# Walk a set of UE-render output trees and emit a flat list of valid location dirs
+# (one per line) into a .txt file consumable by train.sh / infer.sh.
+#
+# Self-contained: works from any CWD. Override DATA_FOLDERS / OUTPUT_FILE via env.
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 
-data_root=/work/nvme/beab/rluo2/viewpoint-transfer/data
-data_folders=(outputs_non_arranged_24fps outputs_non_arranged_16fps)
+# ── Defaults (override via env) ─────────────────────────────────────────────
+DATA_ROOT="${DATA_ROOT:-/work/nvme/beab/rluo2/viewpoint-transfer/data}"
+# Space-separated list of subfolder names under DATA_ROOT to scan.
+DATA_FOLDERS="${DATA_FOLDERS:-outputs_arranged outputs_arranged_16fps outputs_non_arranged_16fps}"
+OUTPUT_FILE="${OUTPUT_FILE:-${DATA_ROOT}/train_locations.txt}"
 
-# Prefix each folder with data_root, expand as separate args
+# Build absolute paths
 data_roots=()
-for f in "${data_folders[@]}"; do
-    data_roots+=("${data_root}/${f}")
+for f in ${DATA_FOLDERS}; do
+    data_roots+=("${DATA_ROOT}/${f}")
 done
 
+# ── Env hygiene ─────────────────────────────────────────────────────────────
 source /work/nvme/beab/rluo2/anaconda3/etc/profile.d/conda.sh
 conda activate wan
 
-cd "${REPO_ROOT}"
-export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
+cd "${PROJECT_ROOT}"
+
+echo "==================================================================="
+echo "  DATA_FOLDERS = ${DATA_FOLDERS}"
+echo "  OUTPUT_FILE  = ${OUTPUT_FILE}"
+echo "==================================================================="
 
 python -m view_transfer_via_query.prepare_data.gather_locations \
     --data_roots "${data_roots[@]}" \
-    --output     "../data/train_locations.txt"
+    --output     "${OUTPUT_FILE}"

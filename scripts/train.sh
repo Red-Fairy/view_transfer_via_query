@@ -2,17 +2,21 @@
 # DeepSpeed-driven launch for ViewTransferDiT.  Single-node by default; for
 # multi-node, see scripts/train_multinode.sh which sets MACHINE_RANK / NUM_MACHINES /
 # MAIN_PROCESS_IP per srun task and then re-enters this script.
+#
+# Self-contained: works from any CWD. All paths derive from script location
+# via _common.sh, which exports PROJECT_ROOT (= view_transfer_via_query/) and
+# DIFFSYNTH_ROOT (= DiffSynth-Studio/, where pretrained Wan + diffsynth lib live).
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-SCRIPT_DIR="${REPO_ROOT}/view_transfer_via_query/scripts"
-TMPL_DIR="${REPO_ROOT}/view_transfer_via_query/configs/accelerate"
-DS_CONFIG_DIR="${REPO_ROOT}/view_transfer_via_query/configs/deepspeed"
+source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
+SCRIPT_DIR="${PROJECT_ROOT}/scripts"
+TMPL_DIR="${PROJECT_ROOT}/configs/accelerate"
+DS_CONFIG_DIR="${PROJECT_ROOT}/configs/deepspeed"
 
 # ── Defaults (override via env) ─────────────────────────────────────────────
 MODEL_SIZE="${MODEL_SIZE:-14B}"   # 1.3B | 14B
-LOCATIONS_FILE="${LOCATIONS_FILE:-/work/nvme/beab/rluo2/viewpoint-transfer/data/train_locations.txt}"
-OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/runs/${MODEL_SIZE}_debut}"
+LOCATIONS_FILE="${LOCATIONS_FILE:-/work/nvme/beab/rluo2/viewpoint-transfer/data/train_locations_v2.txt}"
+OUTPUT_DIR="${OUTPUT_DIR:-${PROJECT_ROOT}/runs/${MODEL_SIZE}_debut_v2}"
 NUM_VIDEO_FRAMES="${NUM_VIDEO_FRAMES:-81}"
 PERS_H="${PERS_H:-480}"
 PERS_W="${PERS_W:-832}"
@@ -43,17 +47,17 @@ MACHINE_RANK="${MACHINE_RANK:-0}"
 MAIN_PROCESS_IP="${MAIN_PROCESS_IP:-127.0.0.1}"
 MAIN_PROCESS_PORT="${MAIN_PROCESS_PORT:-29500}"
 
-# Model-size-specific checkpoint defaults
+# Model-size-specific checkpoint defaults (live under DIFFSYNTH_ROOT/models/Wan-AI/)
 case "${MODEL_SIZE}" in
   1.3B)
-    DIT_CKPT="${DIT_CKPT:-/work/nvme/beab/rluo2/viewpoint-transfer/DiffSynth-Studio/models/Wan-AI/Wan2.1-T2V-1.3B/diffusion_pytorch_model.safetensors}"
-    VAE_CKPT="${VAE_CKPT:-/work/nvme/beab/rluo2/viewpoint-transfer/DiffSynth-Studio/models/Wan-AI/Wan2.1-T2V-1.3B/Wan2.1_VAE.pth}"
+    DIT_CKPT="${DIT_CKPT:-${DIFFSYNTH_ROOT}/models/Wan-AI/Wan2.1-T2V-1.3B/diffusion_pytorch_model.safetensors}"
+    VAE_CKPT="${VAE_CKPT:-${DIFFSYNTH_ROOT}/models/Wan-AI/Wan2.1-T2V-1.3B/Wan2.1_VAE.pth}"
     ;;
   14B)
     # 14B ships as 6 sharded safetensors; train.load_dit_state_dict globs them
     # when DIT_CKPT is a directory.
-    DIT_CKPT="${DIT_CKPT:-/work/nvme/beab/rluo2/viewpoint-transfer/DiffSynth-Studio/models/Wan-AI/Wan2.1-T2V-14B}"
-    VAE_CKPT="${VAE_CKPT:-/work/nvme/beab/rluo2/viewpoint-transfer/DiffSynth-Studio/models/Wan-AI/Wan2.1-T2V-1.3B/Wan2.1_VAE.pth}"
+    DIT_CKPT="${DIT_CKPT:-${DIFFSYNTH_ROOT}/models/Wan-AI/Wan2.1-T2V-14B}"
+    VAE_CKPT="${VAE_CKPT:-${DIFFSYNTH_ROOT}/models/Wan-AI/Wan2.1-T2V-1.3B/Wan2.1_VAE.pth}"
     ;;
   *) echo "Unknown MODEL_SIZE=${MODEL_SIZE}"; exit 1 ;;
 esac
@@ -62,10 +66,13 @@ esac
 source /work/nvme/beab/rluo2/anaconda3/etc/profile.d/conda.sh
 conda activate wan
 
-# Stray /work/nvme/beab/rluo2/copy.py shadows stdlib if CWD == that dir.
-cd "${REPO_ROOT}"
+# Outputs / configs / accelerate.yaml live under PROJECT_ROOT. Cd there so any
+# relative paths (in templates, configs) resolve under the project tree, not under
+# wherever the user happened to launch from.
+cd "${PROJECT_ROOT}"
 
-export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
+# PYTHONPATH already set by _common.sh (DIFFSYNTH_ROOT — makes both diffsynth.X
+# and view_transfer_via_query.X importable).
 export OPENCV_IO_ENABLE_OPENEXR=1
 # Reduce CUDA caching-allocator fragmentation; without this, ZeRO-2 + grad-ckpt
 # at 14B+481×832×81 leaves ~13 GB reserved-but-unallocated and OOMs around step 3.

@@ -69,37 +69,53 @@ def load_dit_state_dict(ckpt_path: str) -> dict:
     return _diffsynth_load_state_dict(ckpt_path)
 
 
-# ── CFG dropout (same as before, operates on encoded GPU dict) ───────────────
+# ── CFG dropout (v2: per-stream + joint, see PLAN.md §10.9) ─────────────────
 
 
-def apply_cfg_dropout(batch: dict, drop_prob: float = 0.1) -> dict:
+def apply_cfg_dropout(
+    batch: dict,
+    per_stream_prob: float = 0.05,
+    joint_prob: float = 0.10,
+) -> dict:
+    """v2 CFG dropout: each stream is dropped independently at `per_stream_prob`,
+    AND with `joint_prob` ALL streams are jointly zeroed in the same step. The joint-drop
+    branch trains the model on the all-zero unconditional case so inference-time CFG
+    (which uses zero-everything as uncond) is in-distribution.
+
+    Effective per-stream drop rate ≈ per_stream_prob + joint_prob - per_stream_prob*joint_prob.
+    P(all streams zero) ≈ joint_prob (per-stream contribution is negligible for 5 streams at 5%).
+    """
     B = batch["source_latent"].shape[0]
     device = batch["source_latent"].device
 
-    def _bcast(mask, ndim):
-        return mask.view([B] + [1] * (ndim - 1))
+    # Per-tensor mask: keep dtype identical to the input (avoids silent bf16→fp32
+    # promotion that would later trip Conv3d's dtype-equality check).
+    def _scale(t: torch.Tensor, drop_mask: torch.Tensor) -> torch.Tensor:
+        keep = (~drop_mask).view([B] + [1] * (t.dim() - 1)).to(t.dtype)
+        return t * keep
+
+    # Joint drop mask — when True, zeros every stream simultaneously
+    drop_all = (torch.rand(B, device=device) < joint_prob)
+
+    # Per-stream drops (independent of each other), OR-combined with joint drop
+    drop_src    = (torch.rand(B, device=device) < per_stream_prob) | drop_all
+    drop_render = (torch.rand(B, device=device) < per_stream_prob) | drop_all
+    drop_blob   = (torch.rand(B, device=device) < per_stream_prob) | drop_all
+    drop_plk    = (torch.rand(B, device=device) < per_stream_prob) | drop_all
+    drop_txt    = (torch.rand(B, device=device) < per_stream_prob) | drop_all
 
     # source video coupled with source plücker
-    drop_src = (torch.rand(B, device=device) < drop_prob)
-    batch["source_latent"] = batch["source_latent"] * (~_bcast(drop_src, 5)).float()
-    batch["plucker_src"] = batch["plucker_src"] * (~_bcast(drop_src, 5)).float()
-
+    batch["source_latent"] = _scale(batch["source_latent"], drop_src)
+    batch["plucker_src"]   = _scale(batch["plucker_src"],   drop_src)
     # rendered + mask coupled
-    drop_render = (torch.rand(B, device=device) < drop_prob)
-    batch["rendered_latent"] = batch["rendered_latent"] * (~_bcast(drop_render, 5)).float()
-    batch["mask_packed"] = batch["mask_packed"] * (~_bcast(drop_render, 5)).float()
-
+    batch["rendered_latent"] = _scale(batch["rendered_latent"], drop_render)
+    batch["mask_packed"]     = _scale(batch["mask_packed"],     drop_render)
     # blob
-    drop_blob = (torch.rand(B, device=device) < drop_prob)
-    batch["blob_latent"] = batch["blob_latent"] * (~_bcast(drop_blob, 5)).float()
-
+    batch["blob_latent"]   = _scale(batch["blob_latent"],   drop_blob)
     # target plücker
-    drop_plk = (torch.rand(B, device=device) < drop_prob)
-    batch["plucker_tgt"] = batch["plucker_tgt"] * (~_bcast(drop_plk, 5)).float()
-
+    batch["plucker_tgt"]   = _scale(batch["plucker_tgt"],   drop_plk)
     # text
-    drop_txt = (torch.rand(B, device=device) < drop_prob)
-    batch["text_emb"] = batch["text_emb"] * (~_bcast(drop_txt, 3)).float()
+    batch["text_emb"]      = _scale(batch["text_emb"],      drop_txt)
 
     return batch
 
@@ -177,7 +193,15 @@ def parse_args():
     p.add_argument("--save_every", type=int, default=5000)
     p.add_argument("--log_every", type=int, default=50)
     p.add_argument("--gradient_checkpointing", action="store_true")
-    p.add_argument("--cfg_drop_prob", type=float, default=0.1)
+    # v2 CFG dropout: per-stream + joint. See PLAN.md §10.9.
+    p.add_argument("--cfg_drop_prob", type=float, default=0.05,
+                   help="Per-stream independent CFG drop probability (v2 default 0.05).")
+    p.add_argument("--cfg_joint_drop_prob", type=float, default=0.10,
+                   help="Joint-drop probability — zeroes ALL conditioning streams jointly. "
+                        "Trains the all-zero unconditional case so inference CFG is in-distribution.")
+    p.add_argument("--skip_step0_invariant_check", action="store_true",
+                   help="Skip the assert_step0_invariant() check after model init. "
+                        "Use only when warm-starting from a non-trivially-trained checkpoint.")
     p.add_argument("--seed", type=int, default=None,
                    help="Random seed. Omit (or pass empty / negative) to draw a fresh seed from os.urandom; "
                         "the chosen seed is logged so a run can be reproduced.")
@@ -292,7 +316,13 @@ def log_training_artifacts(step: int, batch: dict, output_dir: str, fps: int = 2
             json.dump(meta, f, indent=2)
 
 
-_TRAINABLE_KEY_PREFIXES = ("lora", "plucker_encoder", "patch_embed_source", "patch_embed_target")
+_TRAINABLE_KEY_PREFIXES = (
+    "lora",
+    "plucker_encoder",   # matches both plucker_encoder and plucker_encoder_src
+    "patch_embed_source",
+    "geoada_",           # geoada_patch_embedding + geoada_blocks (incl. before/after_proj)
+    "cross_attn_src",
+)
 
 
 def save_trainable(model, save_path):
@@ -441,6 +471,22 @@ def main():
         model, optimizer, dataloader, lr_scheduler
     )
 
+    # v2 step-0 invariant check: verify that with the new architecture and zero-inits,
+    # the model would reproduce pretrained Wan exactly at step 0. Only meaningful on a
+    # fresh init (no resume / no warm-start), and only worth running on the main process.
+    if (
+        not args.resume
+        and not args.init_trainable
+        and not args.skip_step0_invariant_check
+        and accelerator.is_main_process
+    ):
+        try:
+            accelerator.unwrap_model(model).assert_step0_invariant()
+            print("[init] step-0 invariant OK — model is equivalent to pretrained Wan at step 0.")
+        except AssertionError as e:
+            print(f"[init] step-0 invariant FAILED: {e}")
+            raise
+
     # Resume from a previously-saved checkpoint dir (ZeRO-sharded).
     if args.resume:
         if accelerator.is_main_process:
@@ -527,7 +573,11 @@ def main():
             t_wait = time.perf_counter() - t0
 
             with record_function("cfg_dropout_and_cast"):
-                batch = apply_cfg_dropout(batch, drop_prob=args.cfg_drop_prob)
+                batch = apply_cfg_dropout(
+                    batch,
+                    per_stream_prob=args.cfg_drop_prob,
+                    joint_prob=args.cfg_joint_drop_prob,
+                )
                 batch = {
                     k: (v.to(train_dtype) if isinstance(v, torch.Tensor) and torch.is_floating_point(v) else v)
                     for k, v in batch.items()

@@ -47,25 +47,47 @@ def _make_batch(cfg, device="cpu"):
     }
 
 
-# ── CFG Dropout ──
+# ── CFG Dropout (v2: per-stream + joint) ──
 
 def test_cfg_dropout_shapes(cfg):
     batch = _make_batch(cfg)
-    batch_out = apply_cfg_dropout(batch, drop_prob=0.5)
+    batch_out = apply_cfg_dropout(batch, per_stream_prob=0.25, joint_prob=0.25)
     for k, v in batch_out.items():
         assert v.shape == batch[k].shape, f"{k} shape mismatch"
 
 
-def test_cfg_dropout_zeros_some(cfg):
+def test_cfg_dropout_zeros_when_joint_prob_one(cfg):
+    """joint_prob=1.0 forces every stream to be zeroed in every batch element."""
     torch.manual_seed(0)
     batch = _make_batch(cfg)
-    # With p=1.0, everything should be zeroed
-    batch_out = apply_cfg_dropout(batch, drop_prob=1.0)
+    batch_out = apply_cfg_dropout(batch, per_stream_prob=0.0, joint_prob=1.0)
     assert batch_out["source_latent"].abs().sum() == 0
     assert batch_out["rendered_latent"].abs().sum() == 0
     assert batch_out["blob_latent"].abs().sum() == 0
+    assert batch_out["plucker_src"].abs().sum() == 0
     assert batch_out["plucker_tgt"].abs().sum() == 0
+    assert batch_out["mask_packed"].abs().sum() == 0
     assert batch_out["text_emb"].abs().sum() == 0
+
+
+def test_cfg_dropout_per_stream_only(cfg):
+    """per_stream_prob=1.0 + joint_prob=0.0 still zeros every stream (every stream
+    independently rolls True with p=1.0)."""
+    torch.manual_seed(0)
+    batch = _make_batch(cfg)
+    batch_out = apply_cfg_dropout(batch, per_stream_prob=1.0, joint_prob=0.0)
+    assert batch_out["source_latent"].abs().sum() == 0
+    assert batch_out["text_emb"].abs().sum() == 0
+
+
+def test_cfg_dropout_no_drop_preserves_input(cfg):
+    """All probs zero → batch unchanged."""
+    torch.manual_seed(0)
+    batch = _make_batch(cfg)
+    orig = {k: v.clone() for k, v in batch.items()}
+    batch_out = apply_cfg_dropout(batch, per_stream_prob=0.0, joint_prob=0.0)
+    for k in orig:
+        assert torch.equal(batch_out[k], orig[k]), f"{k} changed despite zero drop probs"
 
 
 # ── Training Step ──

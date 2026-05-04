@@ -21,8 +21,8 @@
 
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-SCRIPT_DIR="${REPO_ROOT}/view_transfer_via_query/scripts"
+source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
+SCRIPT_DIR="${PROJECT_ROOT}/scripts"
 
 # ── Cluster topology from slurm ─────────────────────────────────────────────
 : "${SLURM_NNODES:?must be set (run under sbatch/srun, or set manually)}"
@@ -36,7 +36,7 @@ NUM_PROCESSES=$((NUM_MACHINES * GPUS_PER_NODE))
 MAIN_PROCESS_IP=$(getent hosts "${NODES[0]}" | awk '{print $1}' | head -n1)
 MAIN_PROCESS_PORT="${MAIN_PROCESS_PORT:-29500}"
 
-OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/runs/mn_$(date +%Y%m%d_%H%M%S)}"
+OUTPUT_DIR="${OUTPUT_DIR:-${PROJECT_ROOT}/runs/mn_$(date +%Y%m%d_%H%M%S)}"
 mkdir -p "${OUTPUT_DIR}/logs"
 
 echo "Multi-node launch:"

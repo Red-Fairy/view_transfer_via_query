@@ -73,6 +73,7 @@ def test_prepare_plucker_shape(model):
 
 # ── Gradient tests ──
 
+@pytest.mark.skip(reason="v1 architecture (patch_embed_target removed in v2; see tests/test_model_v2.py)")
 def test_gradient_flows_through_new_modules(model, cfg):
     """Plucker encoder and both patch embeds should receive gradients."""
     inputs = _make_inputs(cfg)
@@ -86,6 +87,7 @@ def test_gradient_flows_through_new_modules(model, cfg):
         assert block.plucker_encoder.weight.grad is not None, f"Block {i} plucker grad missing"
 
 
+@pytest.mark.skip(reason="v1 architecture (patch_embed_target removed in v2; see tests/test_model_v2.py)")
 def test_freeze_base(model, cfg):
     model.freeze_base()
     trainable = {n for n, p in model.named_parameters() if p.requires_grad}
