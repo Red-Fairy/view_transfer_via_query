@@ -1,0 +1,21 @@
+compute_environment: LOCAL_MACHINE
+debug: false
+distributed_type: DEEPSPEED
+deepspeed_config:
+  deepspeed_config_file: __DS_CONFIG__
+  deepspeed_multinode_launcher: standard
+  zero3_init_flag: false
+downcast_bf16: 'no'
+enable_cpu_affinity: false
+machine_rank: __MACHINE_RANK__
+main_training_function: main
+main_process_ip: __MAIN_IP__
+main_process_port: __MAIN_PORT__
+num_machines: __NUM_MACHINES__
+num_processes: __NUM_PROCESSES__
+rdzv_backend: static
+same_network: true
+tpu_env: []
+tpu_use_cluster: false
+tpu_use_sudo: false
+use_cpu: false

@@ -1,0 +1,44 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Model weights / large binaries
+*.pkl
+*.safetensors
+*.pth
+*.ckpt
+*.pt
+*.bin
+
+# Distribution / packaging
+*.egg-info/
+*.egg
+build/
+dist/
+.eggs/
+
+# Test / coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.cache
+
+# Editor / OS
+.vscode/
+.idea/
+*.DS_Store
+
+# Logs
+log*.txt
+*.log
+
+# Generated / output dirs
+viz_trajectories/
+infer_test/
+infer_out/
+experiments/
+outputs/
+runs/
