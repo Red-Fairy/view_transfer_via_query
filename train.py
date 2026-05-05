@@ -218,6 +218,12 @@ def parse_args():
                    help="Dtype for the heaviest preprocess stage (VAE encode). equi2pers / "
                         "lift+render stay fp32 (z-buffer needs depth precision). bf16 ~halves "
                         "VAE encode time and is safe for the Wan VAE.")
+    p.add_argument("--prefetch_depth", type=int, default=2,
+                   help="Number of in-flight batches kept on the side CUDA stream by "
+                        "CUDAStreamPrefetcher. depth=1 = original behaviour; depth=2-3 hides "
+                        "longer per-batch GPU preprocess (VAE encode + lift+render) behind "
+                        "compute when preprocess time > compute time. Each extra slot costs "
+                        "~150 MB GPU memory.")
     p.add_argument("--log_video_every", type=int, default=0,
                    help="0 disables; otherwise dump perspective videos + trajectory JSON every N steps")
     p.add_argument("--log_video_fps", type=int, default=24)
@@ -376,7 +382,7 @@ def main():
         log_with="tensorboard",
         project_dir=args.output_dir,
     )
-    accelerator.init_trackers("view_transfer")
+    accelerator.init_trackers("tensorboard")
     using_ds = accelerator.state.deepspeed_plugin is not None
 
     device = accelerator.device
@@ -552,7 +558,9 @@ def main():
         )
 
     while global_step < args.max_steps:
-        prefetcher = CUDAStreamPrefetcher(dataloader, _preprocess, device=device)
+        prefetcher = CUDAStreamPrefetcher(
+            dataloader, _preprocess, device=device, depth=args.prefetch_depth,
+        )
         iter_p = iter(prefetcher)
         while global_step < args.max_steps:
             iter_t0 = time.perf_counter()

@@ -15,8 +15,8 @@ DS_CONFIG_DIR="${PROJECT_ROOT}/configs/deepspeed"
 
 # ── Defaults (override via env) ─────────────────────────────────────────────
 MODEL_SIZE="${MODEL_SIZE:-14B}"   # 1.3B | 14B
-LOCATIONS_FILE="${LOCATIONS_FILE:-/work/nvme/beab/rluo2/viewpoint-transfer/data/train_locations_v2.txt}"
-OUTPUT_DIR="${OUTPUT_DIR:-${PROJECT_ROOT}/runs/${MODEL_SIZE}_debut_v2}"
+LOCATIONS_FILE="${LOCATIONS_FILE:-/work/nvme/beab/rluo2/viewpoint-transfer/data/train_locations.txt}"
+OUTPUT_DIR="${OUTPUT_DIR:-${PROJECT_ROOT}/runs/${MODEL_SIZE}_2gpu}"
 NUM_VIDEO_FRAMES="${NUM_VIDEO_FRAMES:-81}"
 PERS_H="${PERS_H:-480}"
 PERS_W="${PERS_W:-832}"
@@ -26,6 +26,7 @@ WEIGHT_DECAY="${WEIGHT_DECAY:-0.01}"
 GRADIENT_ACCUMULATION_STEPS="${GRADIENT_ACCUMULATION_STEPS:-1}"
 BATCH_SIZE="${BATCH_SIZE:-1}"
 NUM_WORKERS="${NUM_WORKERS:-2}"
+PREFETCH_DEPTH="${PREFETCH_DEPTH:-2}"   # batches in-flight on the side CUDA stream
 MAX_STEPS="${MAX_STEPS:-10000}"
 SAVE_EVERY="${SAVE_EVERY:-200}"
 LOG_EVERY="${LOG_EVERY:-5}"
@@ -38,10 +39,10 @@ LOG_VIDEO_FPS="${LOG_VIDEO_FPS:-16}"
 PROFILE_STEPS="${PROFILE_STEPS:-0}"
 PROFILE_SHAPES="${PROFILE_SHAPES:-0}"
 TRAIN_DTYPE="${TRAIN_DTYPE:-bf16}"
-DATA_DTYPE="${DATA_DTYPE:-fp32}"
+DATA_DTYPE="${DATA_DTYPE:-bf16}"
 
 # ── Distributed config (single-node by default) ─────────────────────────────
-DEEPSPEED_CONFIG="${DEEPSPEED_CONFIG:-${DS_CONFIG_DIR}/zero2_bf16.json}"
+DEEPSPEED_CONFIG="${DEEPSPEED_CONFIG:-${DS_CONFIG_DIR}/zero2_bf16_cpu_offload.json}"
 NUM_MACHINES="${NUM_MACHINES:-1}"
 MACHINE_RANK="${MACHINE_RANK:-0}"
 MAIN_PROCESS_IP="${MAIN_PROCESS_IP:-127.0.0.1}"
@@ -80,9 +81,8 @@ export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:T
 export TRITON_CACHE_DIR="${TRITON_CACHE_DIR:-/tmp/${USER}/triton_cache}"
 mkdir -p "${TRITON_CACHE_DIR}" "${OUTPUT_DIR}"
 
-# Default to all visible GPUs on this node; override via CUDA_VISIBLE_DEVICES.
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
-GPUS_PER_NODE=$(echo "${CUDA_VISIBLE_DEVICES}" | awk -F',' '{print NF}')
+# Default to all visible GPUs on this node
+GPUS_PER_NODE=$(nvidia-smi --query-gpu=gpu_name --format=csv,noheader | wc -l)
 NUM_PROCESSES="${NUM_PROCESSES:-$((NUM_MACHINES * GPUS_PER_NODE))}"
 
 # ── Render accelerate.yaml from template ────────────────────────────────────
@@ -108,7 +108,7 @@ echo "  MAX_STEPS        = ${MAX_STEPS}, LR=${LR}, BSZ=${BATCH_SIZE}, GA=${GRADI
 echo "  TRAIN_DTYPE      = ${TRAIN_DTYPE}, DATA_DTYPE = ${DATA_DTYPE}"
 echo "  DEEPSPEED_CONFIG = ${DEEPSPEED_CONFIG}"
 echo "  NUM_MACHINES     = ${NUM_MACHINES} (rank ${MACHINE_RANK}, main=${MAIN_PROCESS_IP}:${MAIN_PROCESS_PORT})"
-echo "  NUM_PROCESSES    = ${NUM_PROCESSES}  (CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES})"
+echo "  NUM_PROCESSES    = ${NUM_PROCESSES}"
 echo "  ACCELERATE_YAML  = ${ACCEL_YAML}"
 [ -n "${RESUME}" ] && echo "  RESUME           = ${RESUME}"
 echo "==================================================================="

@@ -20,6 +20,15 @@ Skip a stage with --skip_cameras / --skip_text. Force re-run with --overwrite.
 
 from __future__ import annotations
 
+# Bootstrap: lets `python prepare_data/prep_all_scenes.py …` work in addition to
+# the canonical `python -m view_transfer_via_query.prepare_data.prep_all_scenes …`.
+if __name__ == "__main__" and __package__ in (None, ""):
+    import os as _os, sys as _sys
+    _diffsynth_root = _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+    if _diffsynth_root not in _sys.path:
+        _sys.path.insert(0, _diffsynth_root)
+    __package__ = "view_transfer_via_query.prepare_data"
+
 import argparse
 import json
 import os

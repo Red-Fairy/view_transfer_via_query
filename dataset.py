@@ -79,36 +79,95 @@ class SampleEntry:
     def text_emb_path(self) -> str:
         return os.path.join(self.location_dir, "text_emb.pt")
 
-    def is_complete(self) -> bool:
-        return all(
-            os.path.isdir(p) if p.endswith(("rgb", "depth", "blobs")) else os.path.exists(p)
-            for p in [
-                self.rgb_src_dir,
-                self.rgb_tgt_dir,
-                self.static_rgb_dir,
-                self.static_depth_dir,
-                self.blob_dir,
-                self.c2w_src_path,
-                self.c2w_tgt_path,
-                self.text_emb_path,
-            ]
-        )
+    def is_complete(self, verbose: bool = False) -> bool:
+        """Existence + length-consistency check.
+
+        Returns True iff:
+          1. Every required directory and file exists.
+          2. All sequence sources have an identical length:
+             - PNG counts in `rgb_src`, `rgb_tgt`, `static_rgb`, `blob`
+             - depth-file count in `static_depth` (.exr / .npy / .pt / .pth)
+             - pose-tensor lengths in `c2w_src` and `c2w_tgt`
+             — and that common length is > 0.
+
+        The length check catches partially-prepared locations like the one we
+        hit in training: `c2w_*.pt` had T poses but `Pano_XX_static/depth/` only
+        had 7 EXRs, so a t0 sampled against the c2w length would IndexError on
+        depth load. With this check, such locations are skipped at discovery.
+
+        If `verbose=True`, prints a one-line reason for any rejection so the
+        operator can see which locations are bad.
+        """
+        def _fail(reason: str) -> bool:
+            if verbose:
+                print(
+                    f"  [skip] {self.location_dir}  src={self.src_idx} tgt={self.tgt_idx}: {reason}"
+                )
+            return False
+
+        # 1. Existence
+        for p in (
+            self.rgb_src_dir, self.rgb_tgt_dir,
+            self.static_rgb_dir, self.static_depth_dir, self.blob_dir,
+        ):
+            if not os.path.isdir(p):
+                return _fail(f"missing dir {os.path.relpath(p, self.location_dir)}")
+        for p in (self.c2w_src_path, self.c2w_tgt_path, self.text_emb_path):
+            if not os.path.exists(p):
+                return _fail(f"missing file {os.path.basename(p)}")
+
+        # 2. Length consistency
+        def _count(d: str, exts: tuple) -> int:
+            try:
+                return sum(1 for f in os.listdir(d) if f.lower().endswith(exts))
+            except OSError:
+                return -1
+
+        counts = {
+            "rgb_src":      _count(self.rgb_src_dir,    (".png",)),
+            "rgb_tgt":      _count(self.rgb_tgt_dir,    (".png",)),
+            "static_rgb":   _count(self.static_rgb_dir, (".png",)),
+            "blob":         _count(self.blob_dir,       (".png",)),
+            "static_depth": _count(self.static_depth_dir, (".exr", ".npy", ".pt", ".pth")),
+        }
+
+        # c2w tensor shapes (cheap; small files, sub-ms each)
+        try:
+            counts["c2w_src"] = torch.load(
+                self.c2w_src_path, map_location="cpu", weights_only=True,
+            ).shape[0]
+            counts["c2w_tgt"] = torch.load(
+                self.c2w_tgt_path, map_location="cpu", weights_only=True,
+            ).shape[0]
+        except Exception as e:
+            return _fail(f"failed to load c2w tensors: {e}")
+
+        if any(c <= 0 for c in counts.values()):
+            return _fail(f"empty source: {counts}")
+        if len(set(counts.values())) > 1:
+            return _fail(f"inconsistent lengths: {counts}")
+        return True
 
 
 def discover_entries(
     data_root: Optional[str] = None,
     require_complete: bool = True,
     locations: Optional[List[str]] = None,
+    verbose: bool = False,
 ) -> List[SampleEntry]:
     """Emit valid (src→tgt) entries.
 
     Enumerates all 4 pairings (00,00), (00,01), (01,00), (01,01) per location and
-    keeps the ones whose required dirs/files exist.  In the current UE renders only
-    `Pano_00_static` exists, so only `src="00"` pairings will pass.  (00,00) is a
+    keeps the ones that pass `SampleEntry.is_complete()` (existence + sequence-length
+    consistency across rgb / depth / blob / c2w). In the current UE renders only
+    `Pano_00_static` exists, so only `src="00"` pairings will pass. (00,00) is a
     same-camera pairing useful for pure-rotation training; (00,01) gives translation.
 
     Either `data_root` (walk scene/location subdirs) or `locations` (an explicit
     list of location_dir paths) must be provided.
+
+    If `verbose=True`, prints a per-rejection reason from `is_complete()` and a
+    final summary count.
     """
     if (data_root is None) == (locations is None):
         raise ValueError("Provide exactly one of `data_root` or `locations`.")
@@ -127,12 +186,20 @@ def discover_entries(
         loc_dirs = list(locations)
 
     entries: List[SampleEntry] = []
+    n_skipped = 0
     for loc_dir in loc_dirs:
         for s in ("00", "01"):
             for t in ("00", "01"):
                 e = SampleEntry(location_dir=loc_dir, src_idx=s, tgt_idx=t)
-                if (not require_complete) or e.is_complete():
+                if (not require_complete) or e.is_complete(verbose=verbose):
                     entries.append(e)
+                else:
+                    n_skipped += 1
+    if verbose:
+        print(
+            f"discover_entries: kept {len(entries)} / {len(entries) + n_skipped} "
+            f"({n_skipped} skipped)"
+        )
     return entries
 
 

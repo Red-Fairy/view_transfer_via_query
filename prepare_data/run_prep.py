@@ -24,24 +24,45 @@ Per-location output layout after this script:
         Pano_00/, Pano_00_static/, Pano_01/, Pano_01_static/    (already exists)
         Pano_00/blobs/, Pano_01/blobs/                          (user-supplied)
 
-Usage:
-    # Per-location
-    python -m view_transfer_via_query.prepare_data.run_prep cameras \\
+Scope: this script operates on **one location at a time**. To run the same prep across
+every location under a data root, use `prep_all_scenes.py` instead. To enumerate
+training-ready locations into a `.txt` file consumed by train.sh / infer.sh, use
+`gather_locations.py` (or the `prep_data.sh` wrapper).
+
+Usage (run from inside `view_transfer_via_query/`; either invocation works):
+
+    # Parse one location's UE camera_params.json → c2w_PanoCam_NN.pt
+    python prepare_data/run_prep.py cameras \\
         --location_dir /path/to/scene/.../x_y_s_..._n_p_p
 
-    # Per-scene (encode T5 once and reuse for all its locations)
-    python -m view_transfer_via_query.prepare_data.run_prep text \\
+    # Encode that location's prompt → text_emb.pt (load T5 once per call)
+    python prepare_data/run_prep.py text \\
         --location_dir /path/to/scene/.../x_y_s_..._n_p_p \\
         --prompt "Desert landscape with sand dunes and rocks" \\
         --t5_ckpt /path/to/models_t5_umt5-xxl-enc-bf16.pth \\
         --t5_tokenizer google/umt5-xxl
 
-    # Verify a location is training-ready
-    python -m view_transfer_via_query.prepare_data.run_prep verify \\
+    # Verify a location is training-ready (all required dirs / files exist)
+    python prepare_data/run_prep.py verify \\
         --location_dir /path/to/.../x_y_s_..._n_p_p
+
+The `python -m view_transfer_via_query.prepare_data.run_prep <subcommand> …` form
+also works (e.g. when imported from another package or run via accelerate). The
+bootstrap below promotes a script-style invocation to the package context, so both
+forms resolve relative imports identically.
 """
 
 from __future__ import annotations
+
+# Bootstrap: lets `python prepare_data/run_prep.py …` work in addition to the
+# canonical `python -m view_transfer_via_query.prepare_data.run_prep …`. Sets
+# sys.path + __package__ so both absolute and relative imports resolve.
+if __name__ == "__main__" and __package__ in (None, ""):
+    import os as _os, sys as _sys
+    _diffsynth_root = _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+    if _diffsynth_root not in _sys.path:
+        _sys.path.insert(0, _diffsynth_root)
+    __package__ = "view_transfer_via_query.prepare_data"
 
 import argparse
 import os

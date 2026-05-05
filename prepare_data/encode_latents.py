@@ -56,13 +56,15 @@ def encode_video_to_latent(
     """Encode one perspective video → latent.
 
     Args:
-        video: [T, 3, H, W] in [0, 1] float
+        video: [T, 3, H, W] in [0, 1] (float / bf16 / fp16). Cast to the VAE's own dtype
+               so callers can run a bf16 VAE without manually matching dtypes.
     Returns:
         latent: [16, T_lat, H_lat, W_lat] CPU tensor (VAE-normalized space)
     """
     assert video.dim() == 4 and video.shape[1] == 3, f"Expected [T,3,H,W], got {video.shape}"
-    # [T, 3, H, W] → [3, T, H, W]; normalize to [-1, 1]
-    x = video.permute(1, 0, 2, 3).contiguous().float()
+    vae_dtype = next(vae.model.parameters()).dtype
+    # [T, 3, H, W] → [3, T, H, W]; normalize to [-1, 1]; match VAE dtype
+    x = video.permute(1, 0, 2, 3).contiguous().to(dtype=vae_dtype)
     x = x * 2.0 - 1.0
     latents = vae.encode([x], device=device, tiled=tiled)  # [1, 16, T_lat, H_lat, W_lat]
     return latents[0].cpu()
