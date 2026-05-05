@@ -11,6 +11,8 @@
 #   NUM_PER_LOCATION    int                   (default 1)
 #   SRC_IDX / TGT_IDX   "00" | "01"           (default "00" / "01")
 #   DUAL_PROJECTION     "1" to enable         (default unset)
+#   PERS_H / PERS_W     int                   (default 368 / 640 — matches recommended training)
+#   NUM_VIDEO_FRAMES    int                   (default 81)
 #
 #   LOCATIONS_FILE      path to .txt          (default train_locations_v2.txt)
 #   OUT_DIR             path                  (default ${PROJECT_ROOT}/infer_out/<run_tag>)
@@ -30,16 +32,22 @@ MODEL_SIZE="${MODEL_SIZE:-14B}"
 LORA_RANK="${LORA_RANK:-64}"
 LORA_ALPHA="${LORA_ALPHA:-64.0}"
 NUM_INFERENCE_STEPS="${NUM_INFERENCE_STEPS:-50}"
-GUIDANCE_SCALE="${GUIDANCE_SCALE:-1.5}"
+GUIDANCE_SCALE="${GUIDANCE_SCALE:-2.0}"
 NUM_PER_LOCATION="${NUM_PER_LOCATION:-1}"
 SRC_IDX="${SRC_IDX:-00}"
 TGT_IDX="${TGT_IDX:-01}"
 DUAL_PROJECTION="${DUAL_PROJECTION:-}"   # set to any non-empty value to enable
 
-LOCATIONS_FILE="${LOCATIONS_FILE:-/work/nvme/beab/rluo2/viewpoint-transfer/data/train_locations_v2.txt}"
+# Resolution must match what the model was trained at (defaults assume the
+# recommended production config in scripts/train.sh).
+PERS_H="${PERS_H:-368}"
+PERS_W="${PERS_W:-640}"
+NUM_VIDEO_FRAMES="${NUM_VIDEO_FRAMES:-81}"
+
+LOCATIONS_FILE="${LOCATIONS_FILE:-/work/nvme/beab/rluo2/viewpoint-transfer/data/val_locations.txt}"
 
 # Auto-tag the output directory by checkpoint step + guidance scale, unless overridden.
-LORA_CKPT="${LORA_CKPT:-${PROJECT_ROOT}/runs/14B_debut_v2/checkpoint-1600/trainable_params.pt}"
+LORA_CKPT="${LORA_CKPT:-${PROJECT_ROOT}/runs/14B_4gpu_368x640/checkpoint-200/trainable_params.pt}"
 _ckpt_tag="$(basename "$(dirname "${LORA_CKPT}")" 2>/dev/null || echo unknown)"   # e.g. checkpoint-1600
 _g_tag="g${GUIDANCE_SCALE}"
 OUT_DIR="${OUT_DIR:-${PROJECT_ROOT}/infer_out/${MODEL_SIZE}_v2-${_ckpt_tag}-${_g_tag}}"
@@ -76,6 +84,7 @@ echo "  NUM_INFERENCE_STEPS = ${NUM_INFERENCE_STEPS}"
 echo "  GUIDANCE_SCALE      = ${GUIDANCE_SCALE}"
 echo "  NUM_PER_LOCATION    = ${NUM_PER_LOCATION}"
 echo "  SRC/TGT_IDX         = ${SRC_IDX} / ${TGT_IDX}"
+echo "  RES                 = ${PERS_H}x${PERS_W}x${NUM_VIDEO_FRAMES}"
 [ -n "${DUAL_PROJECTION}" ] && echo "  DUAL_PROJECTION     = on"
 echo "==================================================================="
 
@@ -93,4 +102,7 @@ python -m view_transfer_via_query.infer \
     --lora_rank             "${LORA_RANK}" \
     --lora_alpha            "${LORA_ALPHA}" \
     --num_inference_steps   "${NUM_INFERENCE_STEPS}" \
-    --guidance_scale        "${GUIDANCE_SCALE}"
+    --guidance_scale        "${GUIDANCE_SCALE}" \
+    --pers_h                "${PERS_H}" \
+    --pers_w                "${PERS_W}" \
+    --num_video_frames      "${NUM_VIDEO_FRAMES}"
