@@ -112,7 +112,7 @@ def parse_args():
                    help="root containing scene folders (e.g. outputs_non_arranged_cars_v2)")
     p.add_argument("--prompts_json", required=True,
                    help="JSON dict {scene_name: prompt_string}")
-    p.add_argument("--t5_ckpt", default=None,
+    p.add_argument("--t5_ckpt", default='../models/Wan-AI/Wan2.1-T2V-1.3B/models_t5_umt5-xxl-enc-bf16.safetensors',
                    help="UMT5-XXL checkpoint path (required unless --skip_text)")
     p.add_argument("--t5_tokenizer", default="google/umt5-xxl")
     p.add_argument("--device", default="cuda")

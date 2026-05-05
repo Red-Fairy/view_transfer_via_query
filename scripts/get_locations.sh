@@ -19,10 +19,6 @@ for f in ${DATA_FOLDERS}; do
     data_roots+=("${DATA_ROOT}/${f}")
 done
 
-# ── Env hygiene ─────────────────────────────────────────────────────────────
-source /work/nvme/beab/rluo2/anaconda3/etc/profile.d/conda.sh
-conda activate wan
-
 cd "${PROJECT_ROOT}"
 
 echo "==================================================================="

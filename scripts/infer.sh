@@ -47,7 +47,7 @@ NUM_VIDEO_FRAMES="${NUM_VIDEO_FRAMES:-81}"
 LOCATIONS_FILE="${LOCATIONS_FILE:-/work/nvme/beab/rluo2/viewpoint-transfer/data/val_locations.txt}"
 
 # Auto-tag the output directory by checkpoint step + guidance scale, unless overridden.
-LORA_CKPT="${LORA_CKPT:-${PROJECT_ROOT}/runs/14B_4gpu_368x640/checkpoint-200/trainable_params.pt}"
+LORA_CKPT="${LORA_CKPT:-${PROJECT_ROOT}/runs/14B_4gpu_368x640/checkpoint-2000/trainable_params.pt}"
 _ckpt_tag="$(basename "$(dirname "${LORA_CKPT}")" 2>/dev/null || echo unknown)"   # e.g. checkpoint-1600
 _g_tag="g${GUIDANCE_SCALE}"
 OUT_DIR="${OUT_DIR:-${PROJECT_ROOT}/infer_out/${MODEL_SIZE}_v2-${_ckpt_tag}-${_g_tag}}"
@@ -64,10 +64,6 @@ case "${MODEL_SIZE}" in
     ;;
   *) echo "Unknown MODEL_SIZE=${MODEL_SIZE}"; exit 1 ;;
 esac
-
-# ── Env hygiene ─────────────────────────────────────────────────────────────
-source /work/nvme/beab/rluo2/anaconda3/etc/profile.d/conda.sh
-conda activate wan
 
 cd "${PROJECT_ROOT}"
 export OPENCV_IO_ENABLE_OPENEXR=1

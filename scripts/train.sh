@@ -63,10 +63,6 @@ case "${MODEL_SIZE}" in
   *) echo "Unknown MODEL_SIZE=${MODEL_SIZE}"; exit 1 ;;
 esac
 
-# ── Env hygiene ─────────────────────────────────────────────────────────────
-source /work/nvme/beab/rluo2/anaconda3/etc/profile.d/conda.sh
-conda activate wan
-
 # Outputs / configs / accelerate.yaml live under PROJECT_ROOT. Cd there so any
 # relative paths (in templates, configs) resolve under the project tree, not under
 # wherever the user happened to launch from.
