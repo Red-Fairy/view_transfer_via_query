@@ -317,6 +317,10 @@ def parse_args():
     p.add_argument("--num_video_frames", type=int, default=81)
     p.add_argument("--pers_h", type=int, default=480)
     p.add_argument("--pers_w", type=int, default=832)
+    p.add_argument("--use_mesh", action="store_true",
+                   help="Lift static panorama as a cubemap mesh and rasterize via "
+                        "nvdiffrast (with backface culling) instead of point-cloud "
+                        "scatter. Off by default; requires `pip install nvdiffrast`.")
 
     p.add_argument("--fps", type=int, default=16)
     p.add_argument("--device", default="cuda")
@@ -350,6 +354,7 @@ def build_pipeline(args, device: torch.device) -> ViewTransferPipeline:
     return ViewTransferPipeline(
         model=model, vae=vae, scheduler=scheduler, device=device,
         pers_h=args.pers_h, pers_w=args.pers_w,
+        use_mesh=args.use_mesh,
     )
 
 

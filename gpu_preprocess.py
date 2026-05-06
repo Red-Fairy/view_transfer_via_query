@@ -62,6 +62,8 @@ def gpu_preprocess(
     vae_spatial_factor: int = 8,
     lift_render_chunk: int = 4,
     return_videos: bool = False,
+    use_mesh: bool = False,
+    mesh_face_res: int = 1024,
 ) -> Dict:
     """One step of online preprocessing. Returns a dict ready for the model.
 
@@ -128,6 +130,8 @@ def gpu_preprocess(
                 pers_h=pers_h,
                 pers_w=pers_w,
                 chunk_size=lift_render_chunk,
+                use_mesh=use_mesh,
+                mesh_face_res=mesh_face_res,
             )
             # rendered_b: [T, 3, pers_h, pers_w]; vis_b: [T, 1, pers_h, pers_w]
             rendered_pers_list.append(rendered_b.permute(1, 0, 2, 3).contiguous())   # [3, T, ...]

@@ -124,13 +124,13 @@ def test_yaw_only_rotation():
 
 
 def test_pitch_only_rotation():
-    """Pitch=90° (look down) in OpenCV: pers +Z → pano +Y (down)."""
+    """Pitch=+90° (look UP) in our convention: pers +Z → pano −Y (−Y is up in OpenCV)."""
     R = yaw_pitch_roll_to_R(
         torch.zeros(1), torch.tensor([90.0]), torch.zeros(1),
     )[0]
     pers_forward = torch.tensor([0.0, 0.0, 1.0])
     pano_dir = R @ pers_forward
-    assert torch.allclose(pano_dir, torch.tensor([0.0, 1.0, 0.0]), atol=1e-6)
+    assert torch.allclose(pano_dir, torch.tensor([0.0, -1.0, 0.0]), atol=1e-6)
 
 
 def test_orthonormal_rotations():
@@ -186,17 +186,18 @@ def test_yaw_90_extraction_samples_right():
     assert pers[0, 0, 24:40, 56:72].mean().item() > 0.95
 
 
-def test_pitch_90_extraction_samples_bottom():
-    """With pitch=90° (look down), pers center should sample equirect's bottom row."""
+def test_pitch_90_extraction_samples_top():
+    """With pitch=+90° (look UP in our convention), pers center samples the TOP
+    of the equirect (latitude near +π/2 = up)."""
     He, We = 256, 512
     equi = torch.zeros(1, 3, He, We)
-    # Mark a wide horizontal band at the bottom (latitude near -π/2 = down)
-    _mark_band(equi, 0, He - 16, He, 0, We)
+    # Mark a wide horizontal band at the TOP (rows 0..16) — latitude near +π/2 = up
+    _mark_band(equi, 0, 0, 16, 0, We)
     R_crop = yaw_pitch_roll_to_R(
         torch.zeros(1), torch.tensor([90.0]), torch.zeros(1)
     )
     pers = equi_to_perspective_video(equi, R_crop, fov_h_deg=10.0, pers_h=64, pers_w=128)
-    # With small FOV, all pers pixels should land near the bottom band
+    # With small FOV, all pers pixels should land near the top band
     assert pers[0, 0].mean().item() > 0.8
 
 

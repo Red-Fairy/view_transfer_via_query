@@ -38,6 +38,7 @@ LOG_VIDEO_EVERY="${LOG_VIDEO_EVERY:-100}"
 LOG_VIDEO_FPS="${LOG_VIDEO_FPS:-16}"
 PROFILE_STEPS="${PROFILE_STEPS:-0}"
 PROFILE_SHAPES="${PROFILE_SHAPES:-0}"
+USE_MESH="${USE_MESH:-}"        # set to any non-empty value to use cubemap-mesh lift+render
 TRAIN_DTYPE="${TRAIN_DTYPE:-bf16}"
 DATA_DTYPE="${DATA_DTYPE:-bf16}"
 
@@ -137,6 +138,7 @@ accelerate launch \
         --log_video_fps                "${LOG_VIDEO_FPS}" \
         --profile_steps                "${PROFILE_STEPS}" \
         $([ "${PROFILE_SHAPES}" = "1" ] && echo "--profile_shapes") \
+        $([ -n "${USE_MESH}" ]        && echo "--use_mesh") \
         --train_dtype                  "${TRAIN_DTYPE}" \
         --data_dtype                   "${DATA_DTYPE}" \
         --gradient_checkpointing

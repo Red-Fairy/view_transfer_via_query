@@ -44,6 +44,8 @@ class ViewTransferPipeline:
         device: torch.device,
         pers_h: int = 480,
         pers_w: int = 832,
+        use_mesh: bool = False,
+        mesh_face_res: int = 1024,
     ):
         self.model = model.eval()
         self.vae = vae
@@ -51,6 +53,8 @@ class ViewTransferPipeline:
         self.device = device
         self.pers_h = pers_h
         self.pers_w = pers_w
+        self.use_mesh = use_mesh
+        self.mesh_face_res = mesh_face_res
 
     @classmethod
     def from_pretrained(
@@ -122,6 +126,7 @@ class ViewTransferPipeline:
         cond = gpu_preprocess(
             cpu_batch, vae=self.vae, device=self.device,
             pers_h=self.pers_h, pers_w=self.pers_w,
+            use_mesh=self.use_mesh, mesh_face_res=self.mesh_face_res,
         )
         if "target_latent" in cond:
             cond.pop("target_latent")

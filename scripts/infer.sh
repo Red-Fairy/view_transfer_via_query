@@ -37,6 +37,7 @@ NUM_PER_LOCATION="${NUM_PER_LOCATION:-1}"
 SRC_IDX="${SRC_IDX:-00}"
 TGT_IDX="${TGT_IDX:-01}"
 DUAL_PROJECTION="${DUAL_PROJECTION:-}"   # set to any non-empty value to enable
+USE_MESH="${USE_MESH:-}"                  # set to any non-empty value to use cubemap-mesh lift+render
 
 # Resolution must match what the model was trained at (defaults assume the
 # recommended production config in scripts/train.sh).
@@ -91,6 +92,7 @@ python -m view_transfer_via_query.infer \
     --src_idx               "${SRC_IDX}" \
     --tgt_idx               "${TGT_IDX}" \
     $([ -n "${DUAL_PROJECTION}" ] && echo "--dual_projection") \
+    $([ -n "${USE_MESH}" ] && echo "--use_mesh") \
     --dit_ckpt              "${DIT_CKPT}" \
     --vae_ckpt              "${VAE_CKPT}" \
     --lora_ckpt             "${LORA_CKPT}" \

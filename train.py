@@ -210,6 +210,10 @@ def parse_args():
     p.add_argument("--pers_h", type=int, default=480)
     p.add_argument("--pers_w", type=int, default=832)
     p.add_argument("--same_orientation", action="store_true")
+    p.add_argument("--use_mesh", action="store_true",
+                   help="Lift the static panorama as a cubemap mesh and rasterize via "
+                        "nvdiffrast (with backface culling) instead of point-cloud scatter. "
+                        "Off by default; requires `pip install nvdiffrast`.")
     p.add_argument("--train_dtype", type=str, default="bf16", choices=["fp32", "bf16", "fp16"],
                    help="Dtype used for model weights, batch tensors, loss, and grads. "
                         "We do NOT use Accelerator autocast (Accelerator(mixed_precision='no')); "
@@ -506,6 +510,7 @@ def main():
             cpu_batch, vae=vae, device=device,
             pers_h=args.pers_h, pers_w=args.pers_w,
             return_videos=log_videos,
+            use_mesh=args.use_mesh,
         )
 
     # 7. Training loop ----------------------------------------------------------

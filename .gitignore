@@ -42,3 +42,4 @@ infer_out/
 experiments/
 outputs/
 runs/
+viz_mesh_render/*
