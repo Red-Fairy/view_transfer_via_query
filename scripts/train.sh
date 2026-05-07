@@ -9,14 +9,15 @@
 set -euo pipefail
 
 source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
+
 SCRIPT_DIR="${PROJECT_ROOT}/scripts"
 TMPL_DIR="${PROJECT_ROOT}/configs/accelerate"
 DS_CONFIG_DIR="${PROJECT_ROOT}/configs/deepspeed"
 
 # ── Defaults (override via env) ─────────────────────────────────────────────
 MODEL_SIZE="${MODEL_SIZE:-14B}"   # 1.3B | 14B
-LOCATIONS_FILE="${LOCATIONS_FILE:-/work/nvme/beab/rluo2/viewpoint-transfer/data/train_locations.txt}"
-OUTPUT_DIR="${OUTPUT_DIR:-${PROJECT_ROOT}/runs/${MODEL_SIZE}_2gpu}"
+LOCATIONS_FILE="${LOCATIONS_FILE:-/work/nvme/beab/rluo2/viewpoint-transfer/data/split_files/train.txt}"
+OUTPUT_DIR="${OUTPUT_DIR:-${PROJECT_ROOT}/runs/${MODEL_SIZE}_test}"
 NUM_VIDEO_FRAMES="${NUM_VIDEO_FRAMES:-81}"
 PERS_H="${PERS_H:-480}"
 PERS_W="${PERS_W:-832}"
@@ -25,7 +26,7 @@ LR="${LR:-1e-4}"
 WEIGHT_DECAY="${WEIGHT_DECAY:-0.01}"
 GRADIENT_ACCUMULATION_STEPS="${GRADIENT_ACCUMULATION_STEPS:-1}"
 BATCH_SIZE="${BATCH_SIZE:-1}"
-NUM_WORKERS="${NUM_WORKERS:-2}"
+NUM_WORKERS="${NUM_WORKERS:-4}"
 PREFETCH_DEPTH="${PREFETCH_DEPTH:-2}"   # batches in-flight on the side CUDA stream
 MAX_STEPS="${MAX_STEPS:-10000}"
 SAVE_EVERY="${SAVE_EVERY:-200}"
@@ -34,7 +35,7 @@ WARMUP_STEPS="${WARMUP_STEPS:-100}"
 SEED="${SEED:-}"   # empty → train.py draws a fresh random seed (logged at startup)
 RESUME="${RESUME:-}"            # empty → fresh run; else path to a checkpoint dir (same world size + ZeRO)
 INIT_TRAINABLE="${INIT_TRAINABLE:-}"   # empty → no warm-start; else path to trainable_params.pt
-LOG_VIDEO_EVERY="${LOG_VIDEO_EVERY:-100}"
+LOG_VIDEO_EVERY="${LOG_VIDEO_EVERY:-0}"
 LOG_VIDEO_FPS="${LOG_VIDEO_FPS:-16}"
 PROFILE_STEPS="${PROFILE_STEPS:-0}"
 PROFILE_SHAPES="${PROFILE_SHAPES:-0}"
@@ -43,7 +44,7 @@ TRAIN_DTYPE="${TRAIN_DTYPE:-bf16}"
 DATA_DTYPE="${DATA_DTYPE:-bf16}"
 
 # ── Distributed config (single-node by default) ─────────────────────────────
-DEEPSPEED_CONFIG="${DEEPSPEED_CONFIG:-${DS_CONFIG_DIR}/zero2_bf16_cpu_offload.json}"
+DEEPSPEED_CONFIG="${DEEPSPEED_CONFIG:-${DS_CONFIG_DIR}/zero2_bf16.json}"
 NUM_MACHINES="${NUM_MACHINES:-1}"
 MACHINE_RANK="${MACHINE_RANK:-0}"
 MAIN_PROCESS_IP="${MAIN_PROCESS_IP:-127.0.0.1}"
@@ -56,8 +57,6 @@ case "${MODEL_SIZE}" in
     VAE_CKPT="${VAE_CKPT:-${DIFFSYNTH_ROOT}/models/Wan-AI/Wan2.1-T2V-1.3B/Wan2.1_VAE.pth}"
     ;;
   14B)
-    # 14B ships as 6 sharded safetensors; train.load_dit_state_dict globs them
-    # when DIT_CKPT is a directory.
     DIT_CKPT="${DIT_CKPT:-${DIFFSYNTH_ROOT}/models/Wan-AI/Wan2.1-T2V-14B}"
     VAE_CKPT="${VAE_CKPT:-${DIFFSYNTH_ROOT}/models/Wan-AI/Wan2.1-T2V-1.3B/Wan2.1_VAE.pth}"
     ;;

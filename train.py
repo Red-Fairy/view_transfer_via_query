@@ -21,6 +21,7 @@ import sys
 import argparse
 import math
 import time
+import json
 
 import torch
 import torch.nn.functional as F
@@ -376,6 +377,10 @@ def main():
     if args.seed is None or args.seed < 0:
         args.seed = int.from_bytes(os.urandom(4), "little")
     set_seed(args.seed)
+
+    # save the args to a json file
+    with open(os.path.join(args.output_dir, "args.json"), "w") as f:
+        json.dump(args.__dict__, f, indent=2)
 
     # All distributed config (mixed_precision, deepspeed_plugin, num_processes, …) is
     # routed through accelerate's --config_file YAML, which references our DS JSON.

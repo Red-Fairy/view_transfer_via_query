@@ -10,8 +10,8 @@ source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 # ── Defaults (override via env) ─────────────────────────────────────────────
 DATA_ROOT="${DATA_ROOT:-/work/nvme/beab/rluo2/viewpoint-transfer/data}"
 # Space-separated list of subfolder names under DATA_ROOT to scan.
-DATA_FOLDERS="${DATA_FOLDERS:-outputs_arranged outputs_arranged_16fps outputs_non_arranged_16fps}"
-OUTPUT_FILE="${OUTPUT_FILE:-${DATA_ROOT}/train_locations.txt}"
+DATA_FOLDERS="${DATA_FOLDERS:-outputs_arranged outputs_non_arranged}"
+OUTPUT_DIR="${OUTPUT_DIR:-${DATA_ROOT}/split_files}"
 
 # Build absolute paths
 data_roots=()
@@ -23,9 +23,9 @@ cd "${PROJECT_ROOT}"
 
 echo "==================================================================="
 echo "  DATA_FOLDERS = ${DATA_FOLDERS}"
-echo "  OUTPUT_FILE  = ${OUTPUT_FILE}"
+echo "  OUTPUT_DIR  = ${OUTPUT_DIR}"
 echo "==================================================================="
 
 python -m view_transfer_via_query.prepare_data.gather_locations \
     --data_roots "${data_roots[@]}" \
-    --output     "${OUTPUT_FILE}"
+    --output     "${OUTPUT_DIR}"
