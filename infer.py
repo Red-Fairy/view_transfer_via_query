@@ -31,6 +31,7 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+import cv2
 import numpy as np
 import torch
 import imageio.v2 as imageio
@@ -241,6 +242,59 @@ def folder_name(sample: Dict) -> str:
     return f"{loc.parent.name}__{loc.name}__src{sample['src_idx']}tgt{sample['tgt_idx']}_t{int(sample['t_offset'])}"
 
 
+# ── 2x3 grid stitch (writes grid.mp4 next to the 6 per-sample mp4s) ─────────
+
+
+# Row 1: src       rendered    tgt_gt
+# Row 2: blob      visibility  pred
+GRID_LAYOUT = [
+    [("src",   "src.mp4"),  ("rendered",   "rendered.mp4"),   ("tgt_gt", "tgt_gt.mp4")],
+    [("blob",  "blob.mp4"), ("visibility", "visibility.mp4"), ("pred",   "pred.mp4")],
+]
+
+
+def _row_label_strip(labels: List[str], cell_w: int, height: int = 30,
+                     font_scale: float = 0.6) -> np.ndarray:
+    strip = np.full((height, cell_w * len(labels), 3), 255, dtype=np.uint8)
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    for i, label in enumerate(labels):
+        (tw, th), _ = cv2.getTextSize(label, font, font_scale, 1)
+        x = i * cell_w + (cell_w - tw) // 2
+        y = (height + th) // 2
+        cv2.putText(strip, label, (x, y), font, font_scale, (0, 0, 0), 1, cv2.LINE_AA)
+    return strip
+
+
+def make_grid_video(sample_dir: Path, fps: int):
+    """Stitch the 6 per-sample mp4s into one 2x3 `grid.mp4`."""
+    videos: Dict[str, np.ndarray] = {}
+    for row in GRID_LAYOUT:
+        for _, fname in row:
+            r = imageio.get_reader(str(sample_dir / fname))
+            videos[fname] = np.stack([f for f in r], axis=0)
+            r.close()
+
+    shapes = {n: v.shape for n, v in videos.items()}
+    Ts = {s[0] for s in shapes.values()}
+    Hs = {s[1] for s in shapes.values()}
+    Ws = {s[2] for s in shapes.values()}
+    if not (len(Ts) == len(Hs) == len(Ws) == 1):
+        raise ValueError(f"shape mismatch in {sample_dir}: {shapes}")
+    T, H, W = Ts.pop(), Hs.pop(), Ws.pop()
+
+    label_h = 30
+    label_top = _row_label_strip([l[0] for l in GRID_LAYOUT[0]], cell_w=W, height=label_h)
+    label_bot = _row_label_strip([l[0] for l in GRID_LAYOUT[1]], cell_w=W, height=label_h)
+
+    out = []
+    for t in range(T):
+        row1 = np.concatenate([videos[fname][t] for _, fname in GRID_LAYOUT[0]], axis=1)
+        row2 = np.concatenate([videos[fname][t] for _, fname in GRID_LAYOUT[1]], axis=1)
+        out.append(np.concatenate([label_top, row1, label_bot, row2], axis=0))
+
+    imageio.mimsave(str(sample_dir / "grid.mp4"), out, fps=fps, macro_block_size=2)
+
+
 def render_and_save(
     sample: Dict, pipe: ViewTransferPipeline, out_dir: Path,
     pers_h: int, pers_w: int, fps: int, num_inference_steps: int, guidance_scale: float,
@@ -288,6 +342,7 @@ def render_and_save(
     save_video_uint8(sample_dir / "visibility.mp4", visibility_pers, fps)
     save_video_uint8(sample_dir / "blob.mp4", blob_pers, fps)
     save_info_json(sample_dir / "info.json", sample, args)
+    make_grid_video(sample_dir, fps)
     print(f"  [done] {sample_dir.name}")
 
 
