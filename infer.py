@@ -46,6 +46,7 @@ from view_transfer_via_query.prepare_data.encode_latents import load_wan_vae
 from view_transfer_via_query.prepare_data.video_io import load_png_sequence
 from view_transfer_via_query.prepare_data.extract_perspectives import (
     sample_perspective_trajectory,
+    sample_trajectory_pair,
     yaw_pitch_roll_to_R,
     equi_to_perspective_video,
     compose_perspective_c2w,
@@ -377,6 +378,8 @@ def parse_args():
                         "nvdiffrast (with backface culling) instead of point-cloud "
                         "scatter. Off by default; requires `pip install nvdiffrast`.")
 
+    p.add_argument("--min_overlap", type=float, default=0.25,
+                   help="minimum first-frame frustum overlap between src/tgt (0 = unconstrained)")
     p.add_argument("--fps", type=int, default=16)
     p.add_argument("--device", default="cuda")
     p.add_argument("--dtype", default="bfloat16", choices=["float32", "bfloat16", "float16"])
@@ -449,11 +452,29 @@ def main():
         t_max = T_full - args.num_video_frames
 
         for k in range(args.num_per_location):
-            # System-entropy randomness — no fixed seed
             rng = np.random.default_rng()
             t0 = int(rng.integers(0, t_max + 1))
-            traj_a = sample_perspective_trajectory(args.num_video_frames, rng=rng)
-            traj_b = sample_perspective_trajectory(args.num_video_frames, rng=rng)
+
+            # Load static depth at t0 for depth-based overlap estimation (diff-camera)
+            pairing_a = "same" if entry_a.src_idx == entry_a.tgt_idx else "diff"
+            depth_for_overlap = None
+            if pairing_a == "diff":
+                from .prepare_data.lift_and_render import load_depth_ue as _ldu, load_depth as _ld
+                _dfiles = sorted(f for f in os.listdir(entry_a.static_depth_dir)
+                                 if f.lower().endswith((".exr", ".npy", ".pt", ".pth")))
+                if t0 < len(_dfiles):
+                    _dp = os.path.join(entry_a.static_depth_dir, _dfiles[t0])
+                    depth_for_overlap = torch.from_numpy(
+                        _ldu(_dp) if _dp.endswith(".exr") else _ld(_dp))
+
+            traj_a, traj_b = sample_trajectory_pair(
+                args.num_video_frames, pairing=pairing_a,
+                min_overlap=args.min_overlap,
+                pano_c2w_src_at_t0=pano_c2w_src[t0] if pairing_a == "diff" else None,
+                pano_c2w_tgt_at_t0=torch.load(entry_a.c2w_tgt_path, map_location="cpu", weights_only=True).float()[t0] if pairing_a == "diff" else None,
+                depth_equirect=depth_for_overlap,
+                rng=rng,
+            )
 
             sample_a = build_sample(entry_a, t0, args.num_video_frames, traj_a, traj_b)
             print(f"[gen] {Path(loc).name}  src={entry_a.src_idx} tgt={entry_a.tgt_idx}  t0={t0}  ({k+1}/{args.num_per_location})")

@@ -211,6 +211,9 @@ def parse_args():
     p.add_argument("--pers_h", type=int, default=480)
     p.add_argument("--pers_w", type=int, default=832)
     p.add_argument("--same_orientation", action="store_true")
+    p.add_argument("--min_overlap", type=float, default=0.25,
+                help="minimum first-frame frustum overlap fraction between src and tgt "
+                    "perspective trajectories (0 = unconstrained; default 0.25)")
     p.add_argument("--use_mesh", action="store_true",
                    help="Lift the static panorama as a cubemap mesh and rasterize via "
                         "nvdiffrast (with backface culling) instead of point-cloud scatter. "
@@ -452,6 +455,7 @@ def main():
         num_video_frames=args.num_video_frames,
         same_orientation=args.same_orientation,
         seed=args.seed,
+        min_overlap=args.min_overlap,
     )
     if accelerator.is_main_process:
         print(f"Found {len(dataset)} sample entries.")

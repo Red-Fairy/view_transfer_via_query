@@ -10,6 +10,9 @@ import pytest
 
 from view_transfer_via_query.prepare_data.extract_perspectives import (
     sample_perspective_trajectory,
+    sample_trajectory_pair,
+    _max_angular_delta,
+    _estimate_scene_depth,
     yaw_pitch_roll_to_R,
     fov_to_intrinsics,
     equi_to_perspective_video,
@@ -240,6 +243,81 @@ def test_extract_perspective_e2e_shapes():
     assert out["pers_c2w"].shape == (T, 4, 4)
     assert out["intrinsics"].shape == (4,)
     assert out["R_crop"].shape == (T, 3, 3)
+
+
+# ── Trajectory pair overlap constraint ──
+
+
+def test_max_angular_delta_basic():
+    """Two cameras with identical 90° FOV, 50% overlap → max delta = 45°."""
+    dh, dv = _max_angular_delta(90.0, 90.0, min_overlap=0.5, hw_ratio=480 / 832)
+    assert dh == pytest.approx(45.0, abs=0.1)
+    assert dv > 0
+
+
+def test_max_angular_delta_zero_overlap():
+    """0% overlap → delta ≤ sum-of-half-FOVs (entire non-overlapping range)."""
+    dh, _ = _max_angular_delta(60.0, 80.0, min_overlap=0.0, hw_ratio=1.0)
+    assert dh == pytest.approx((60 + 80) / 2, abs=0.1)
+
+
+def test_sample_trajectory_pair_same_camera_overlap():
+    """Same-camera pairs at min_overlap=0.5 should have first-frame angular distance
+    small enough that the overlap formula is satisfied."""
+    rng = np.random.default_rng(42)
+    violations = 0
+    for _ in range(100):
+        src, tgt = sample_trajectory_pair(81, "same", min_overlap=0.5, rng=rng)
+        fov_s, fov_t = src["fov_h_deg"], tgt["fov_h_deg"]
+        delta_yaw = abs(src["yaw_deg"][0] - tgt["yaw_deg"][0])
+        delta_yaw = min(delta_yaw, 360 - delta_yaw)  # wrap
+        max_dh, _ = _max_angular_delta(fov_s, fov_t, 0.5, hw_ratio=480 / 832)
+        # Allow a small tolerance for jitter at frame 0 (the BASE is constrained,
+        # but one frame of jitter can push slightly past).
+        if delta_yaw > max_dh + 5.0:
+            violations += 1
+    assert violations < 5, f"{violations}/100 samples violated overlap at frame 0"
+
+
+def test_sample_trajectory_pair_diff_camera_with_depth():
+    """Diff-camera with a synthetic depth map should produce trajectories where
+    the tgt first-frame direction aligns with the depth-derived matching direction
+    (within the max-delta window)."""
+    rng = np.random.default_rng(7)
+    # Two pano cameras 5 m apart along +X (OpenCV world).
+    c2w_src = torch.eye(4)
+    c2w_tgt = torch.eye(4); c2w_tgt[0, 3] = 5.0
+    # Depth map: uniform 20 m (far enough that d_tgt ≈ d_src).
+    depth = torch.full((32, 64), 20.0)
+    src, tgt = sample_trajectory_pair(
+        81, "diff", min_overlap=0.3,
+        pano_c2w_src_at_t0=c2w_src, pano_c2w_tgt_at_t0=c2w_tgt,
+        depth_equirect=depth, rng=rng,
+    )
+    # With large D (20 m >> 5 m baseline), tgt yaw should be close to src yaw.
+    delta = abs(src["yaw_deg"][0] - tgt["yaw_deg"][0])
+    delta = min(delta, 360 - delta)
+    assert delta < 60, f"expected close yaw for far scene; got delta={delta:.1f}°"
+
+
+def test_sample_trajectory_pair_backward_compat():
+    """min_overlap=0 → completely independent trajectories (yaw spans full range)."""
+    rng = np.random.default_rng(0)
+    yaws = []
+    for _ in range(200):
+        _, tgt = sample_trajectory_pair(17, "same", min_overlap=0.0, rng=rng)
+        yaws.append(tgt["yaw_deg"][0])
+    yaw_range = max(yaws) - min(yaws)
+    assert yaw_range > 200, f"expected wide yaw range without constraint; got {yaw_range:.1f}°"
+
+
+def test_estimate_scene_depth_uniform():
+    """Uniform depth map → median ≈ that depth (within perturbation range)."""
+    rng = np.random.default_rng(0)
+    depth = torch.full((64, 128), 15.0)
+    D = _estimate_scene_depth(depth, yaw0_deg=0.0, pitch0_deg=0.0, fov_h_deg=90.0, rng=rng)
+    # Median = 15; perturbed by [0.7, 1.5] → D ∈ [10.5, 22.5]
+    assert 10.0 < D < 23.0, f"unexpected D={D}"
 
 
 if __name__ == "__main__":

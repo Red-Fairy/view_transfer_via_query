@@ -40,6 +40,7 @@ generate_mask_batch = _p2e.generate_mask_batch
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 from view_transfer_via_query.prepare_data.extract_perspectives import (
     sample_perspective_trajectory,
+    sample_trajectory_pair,
     yaw_pitch_roll_to_R,
     equi_to_perspective_video,
 )
@@ -183,18 +184,20 @@ def fmt_traj(label: str, traj: dict, frame_idx: int) -> str:
 def load_equi_window(pano_dir: Path, t0: int, T: int, H: int, W: int) -> torch.Tensor:
     """Load `T` frames starting at `t0`, resized to (H, W). Returns uint8 [T,3,H,W].
 
-    Prefers `pano_dir/rgb.mp4` if present (decord, fast); falls back to `pano_dir/rgb/*.png`.
+    Prefers `pano_dir/rgb.mp4` if present AND has enough frames; falls back to PNGs.
     """
     mp4 = pano_dir / "rgb.mp4"
     if mp4.is_file():
-        import decord
-        decord.bridge.set_bridge("native")
-        vr = decord.VideoReader(str(mp4), width=W, height=H)
-        indices = list(range(t0, t0 + T))
-        if max(indices) >= len(vr):
-            raise IndexError(f"Need frame {max(indices)} but mp4 has only {len(vr)}: {mp4}")
-        frames = vr.get_batch(indices).asnumpy()
-        return torch.from_numpy(frames).permute(0, 3, 1, 2).contiguous()
+        try:
+            import decord
+            decord.bridge.set_bridge("native")
+            vr = decord.VideoReader(str(mp4), width=W, height=H)
+            indices = list(range(t0, t0 + T))
+            if max(indices) < len(vr):
+                frames = vr.get_batch(indices).asnumpy()
+                return torch.from_numpy(frames).permute(0, 3, 1, 2).contiguous()
+        except Exception:
+            pass  # fall through to PNG path
 
     rgb_dir = pano_dir / "rgb"
     paths = sorted(rgb_dir.glob("*.png"))
@@ -322,9 +325,27 @@ def render_one(
 # ── Main ────────────────────────────────────────────────────────────────────
 
 
+def _load_locations_from_file(path: str) -> List[Path]:
+    """Read a newline-delimited locations file (same format as dataset.py's)."""
+    out = []
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            p = Path(line)
+            if _has_rgb(p / "Pano_00") and _has_rgb(p / "Pano_01"):
+                out.append(p)
+    return out
+
+
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("--data_root", required=True)
+    src = p.add_mutually_exclusive_group(required=True)
+    src.add_argument("--data_root", type=str, default=None,
+                     help="walk <data_root>/<scene>/<location>/")
+    src.add_argument("--locations_file", type=str, default=None,
+                     help="newline-delimited list of location dirs (same as dataset.py)")
     p.add_argument("--out_dir", required=True)
     p.add_argument("--num_same", type=int, default=50)
     p.add_argument("--num_diff", type=int, default=50)
@@ -340,6 +361,8 @@ def parse_args():
     p.add_argument("--total_video_frames", type=int, default=240,
                    help="number of frames in each Pano mp4 (used for t0 sampling)")
     p.add_argument("--fps", type=int, default=16)
+    p.add_argument("--min_overlap", type=float, default=0.25,
+                   help="min first-frame frustum overlap between src/tgt (0 = unconstrained)")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="cuda")
     p.add_argument("--num_shards", type=int, default=1)
@@ -350,13 +373,17 @@ def parse_args():
 
 def main():
     args = parse_args()
-    data_root = Path(args.data_root)
     out_dir = Path(args.out_dir)
     rng = np.random.default_rng(args.seed)
 
-    locs = discover_locations(data_root)
+    if args.locations_file:
+        locs = _load_locations_from_file(args.locations_file)
+        source_desc = args.locations_file
+    else:
+        locs = discover_locations(Path(args.data_root))
+        source_desc = args.data_root
     if not locs:
-        sys.exit(f"No locations with Pano_{{00,01}}/rgb.mp4 under {data_root}")
+        sys.exit(f"No locations with Pano_{{00,01}} RGB from {source_desc}")
     print(f"Found {len(locs)} locations")
 
     plan = sample_pairings(locs, args.num_same, args.num_diff, rng)
@@ -370,8 +397,32 @@ def main():
     entries = []
     for i, (loc, src, tgt) in enumerate(plan):
         t0 = int(rng.integers(0, t_max + 1))
-        traj_src = sample_perspective_trajectory(args.num_frames, rng=rng)
-        traj_tgt = sample_perspective_trajectory(args.num_frames, rng=rng)
+        pairing = "same" if src == tgt else "diff"
+        # For diff pairings, load c2w + static depth for overlap-direction matching
+        c2w_src_t0 = c2w_tgt_t0 = None
+        depth_t0 = None
+        if pairing == "diff" and args.min_overlap > 0:
+            try:
+                c2w_src_t0 = torch.load(loc / f"c2w_PanoCam_{src}.pt", map_location="cpu", weights_only=True).float()[t0]
+                c2w_tgt_t0 = torch.load(loc / f"c2w_PanoCam_{tgt}.pt", map_location="cpu", weights_only=True).float()[t0]
+                # Load static depth at t0 for accurate scene-depth estimation
+                from view_transfer_via_query.prepare_data.lift_and_render import load_depth_ue, load_depth
+                depth_dir = loc / f"Pano_{src}_static" / "depth"
+                if depth_dir.is_dir():
+                    dfiles = sorted(f for f in depth_dir.iterdir()
+                                    if f.suffix.lower() in (".exr", ".npy", ".pt", ".pth"))
+                    if t0 < len(dfiles):
+                        dp = str(dfiles[t0])
+                        depth_t0 = torch.from_numpy(
+                            load_depth_ue(dp) if dp.endswith(".exr") else load_depth(dp))
+            except Exception:
+                pass  # fall back to heuristic if files missing
+        traj_src, traj_tgt = sample_trajectory_pair(
+            args.num_frames, pairing=pairing, min_overlap=args.min_overlap,
+            pano_c2w_src_at_t0=c2w_src_t0, pano_c2w_tgt_at_t0=c2w_tgt_t0,
+            depth_equirect=depth_t0,
+            rng=rng,
+        )
         kind = "same" if src == tgt else "diff"
         out_name = f"{kind}_{i:03d}_{loc.parent.name}_{loc.name}_{src}{tgt}_t{t0}.mp4"
         entries.append((i, loc, src, tgt, t0, traj_src, traj_tgt, kind, out_name))

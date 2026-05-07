@@ -33,7 +33,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from .prepare_data.video_io import load_png_sequence
-from .prepare_data.extract_perspectives import sample_perspective_trajectory
+from .prepare_data.extract_perspectives import sample_perspective_trajectory, sample_trajectory_pair
 from .prepare_data.lift_and_render import load_depth, load_depth_ue
 
 
@@ -245,6 +245,7 @@ class ViewTransferDataset(Dataset):
         same_orientation: bool = False,
         seed: int = 0,
         locations_file: Optional[str] = None,
+        min_overlap: float = 0.25,
     ):
         if locations_file is not None:
             locations = load_locations_file(locations_file)
@@ -260,6 +261,7 @@ class ViewTransferDataset(Dataset):
         self.num_video_frames = num_video_frames
         self.same_orientation = same_orientation
         self.base_seed = seed
+        self.min_overlap = min_overlap
 
     def __len__(self) -> int:
         return len(self.entries)
@@ -313,15 +315,21 @@ class ViewTransferDataset(Dataset):
             depth_np = load_depth(depth_files[t0])
         static_depth_t0 = torch.from_numpy(depth_np)
 
-        # Trajectories
-        src_traj = sample_perspective_trajectory(self.num_video_frames, rng=rng)
+        # Trajectories (with first-frame overlap constraint for diff-camera pairings)
+        pairing = "same" if entry.src_idx == entry.tgt_idx else "diff"
         if self.same_orientation:
-            tgt_traj = {
-                k: (v.copy() if isinstance(v, np.ndarray) else v)
-                for k, v in src_traj.items()
-            }
+            src_traj = sample_perspective_trajectory(self.num_video_frames, rng=rng)
+            tgt_traj = {k: (v.copy() if isinstance(v, np.ndarray) else v)
+                        for k, v in src_traj.items()}
         else:
-            tgt_traj = sample_perspective_trajectory(self.num_video_frames, rng=rng)
+            src_traj, tgt_traj = sample_trajectory_pair(
+                self.num_video_frames, pairing=pairing,
+                min_overlap=getattr(self, "min_overlap", 0.25),
+                pano_c2w_src_at_t0=pano_c2w_src[t0] if pairing == "diff" else None,
+                pano_c2w_tgt_at_t0=pano_c2w_tgt[t0] if pairing == "diff" else None,
+                depth_equirect=static_depth_t0 if pairing == "diff" else None,
+                rng=rng,
+            )
 
         text_emb = torch.load(entry.text_emb_path, map_location="cpu", weights_only=True).float()
 
