@@ -312,6 +312,7 @@ def render_and_save(
     pred = pipe.generate(
         batch_no_gt, num_inference_steps=num_inference_steps,
         guidance_scale=guidance_scale, verbose=False,
+        progress_desc=f"gen {sample_dir.name}",
     )[0]  # [3, T, H, W] uint8 cpu
 
     # 2. Pixel-space conditions (no VAE round-trip)
@@ -373,10 +374,11 @@ def parse_args():
     p.add_argument("--num_video_frames", type=int, default=81)
     p.add_argument("--pers_h", type=int, default=480)
     p.add_argument("--pers_w", type=int, default=832)
-    p.add_argument("--use_mesh", action="store_true",
+    p.add_argument("--use_mesh", action=argparse.BooleanOptionalAction, default=True,
                    help="Lift static panorama as a cubemap mesh and rasterize via "
                         "nvdiffrast (with backface culling) instead of point-cloud "
-                        "scatter. Off by default; requires `pip install nvdiffrast`.")
+                        "scatter. ON by default for inference; pass --no-use_mesh to "
+                        "fall back to the point-cloud path.")
 
     p.add_argument("--min_overlap", type=float, default=0.25,
                    help="minimum first-frame frustum overlap between src/tgt (0 = unconstrained)")
@@ -441,10 +443,11 @@ def main():
                 n_skipped += 1
                 continue
 
-        # Pano frame count from the c2w tensor
-        pano_c2w_src = torch.load(entry_a.c2w_src_path, map_location="cpu", weights_only=True)
+        # Pano c2w tensors — used both for T_full and for diff-camera trajectory sampling
+        # below (we keep them resident across the per-location k-loop instead of reloading).
+        pano_c2w_src = torch.load(entry_a.c2w_src_path, map_location="cpu", weights_only=True).float()
+        pano_c2w_tgt = torch.load(entry_a.c2w_tgt_path, map_location="cpu", weights_only=True).float()
         T_full = pano_c2w_src.shape[0]
-        del pano_c2w_src
         if T_full < args.num_video_frames:
             print(f"[skip] T_full={T_full} < num_video_frames={args.num_video_frames}: {loc}")
             n_skipped += 1
@@ -471,7 +474,7 @@ def main():
                 args.num_video_frames, pairing=pairing_a,
                 min_overlap=args.min_overlap,
                 pano_c2w_src_at_t0=pano_c2w_src[t0] if pairing_a == "diff" else None,
-                pano_c2w_tgt_at_t0=torch.load(entry_a.c2w_tgt_path, map_location="cpu", weights_only=True).float()[t0] if pairing_a == "diff" else None,
+                pano_c2w_tgt_at_t0=pano_c2w_tgt[t0] if pairing_a == "diff" else None,
                 depth_equirect=depth_for_overlap,
                 rng=rng,
             )

@@ -31,13 +31,13 @@ source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 MODEL_SIZE="${MODEL_SIZE:-14B}"
 LORA_RANK="${LORA_RANK:-64}"
 LORA_ALPHA="${LORA_ALPHA:-64.0}"
-NUM_INFERENCE_STEPS="${NUM_INFERENCE_STEPS:-50}"
-GUIDANCE_SCALE="${GUIDANCE_SCALE:-2.0}"
+NUM_INFERENCE_STEPS="${NUM_INFERENCE_STEPS:-25}"
+GUIDANCE_SCALE="${GUIDANCE_SCALE:-1.0}"
 NUM_PER_LOCATION="${NUM_PER_LOCATION:-1}"
 SRC_IDX="${SRC_IDX:-00}"
 TGT_IDX="${TGT_IDX:-01}"
 DUAL_PROJECTION="${DUAL_PROJECTION:-}"   # set to any non-empty value to enable
-USE_MESH="${USE_MESH:-}"                  # set to any non-empty value to use cubemap-mesh lift+render
+USE_MESH="${USE_MESH:-1}"                 # 1 = cubemap-mesh lift+render (default); set to 0/empty to fall back to point-cloud
 
 # Resolution must match what the model was trained at (defaults assume the
 # recommended production config in scripts/train.sh).
@@ -45,13 +45,19 @@ PERS_H="${PERS_H:-368}"
 PERS_W="${PERS_W:-640}"
 NUM_VIDEO_FRAMES="${NUM_VIDEO_FRAMES:-81}"
 
-LOCATIONS_FILE="${LOCATIONS_FILE:-/work/nvme/beab/rluo2/viewpoint-transfer/data/val_locations.txt}"
+LOCATIONS_FILE="${LOCATIONS_FILE:-/work/nvme/beab/rluo2/viewpoint-transfer/data/split_files/test.txt}"
 
 # Auto-tag the output directory by checkpoint step + guidance scale, unless overridden.
-LORA_CKPT="${LORA_CKPT:-${PROJECT_ROOT}/runs/14B_4gpu_368x640/checkpoint-2000/trainable_params.pt}"
-_ckpt_tag="$(basename "$(dirname "${LORA_CKPT}")" 2>/dev/null || echo unknown)"   # e.g. checkpoint-1600
-_g_tag="g${GUIDANCE_SCALE}"
-OUT_DIR="${OUT_DIR:-${PROJECT_ROOT}/infer_out/${MODEL_SIZE}_v2-${_ckpt_tag}-${_g_tag}}"
+LORA_CKPT="${LORA_CKPT:-${PROJECT_ROOT}/runs/14B_4gpu_640P_0507/checkpoint-2000/trainable_params.pt}"
+
+# Derive OUT_DIR from LORA_CKPT path:
+#   <PROJECT_ROOT>/runs/<run_tag>/checkpoint-<step>/trainable_params.pt
+# →  <PROJECT_ROOT>/infer_out/<run_tag>/ckpt<step>-g<GUIDANCE_SCALE>
+_ckpt_dir="$(dirname "${LORA_CKPT}")"                          # …/checkpoint-1600
+_ckpt_basename="$(basename "${_ckpt_dir}")"                    # checkpoint-1600
+_ckpt_step="${_ckpt_basename#checkpoint-}"                     # 1600
+_run_tag="$(basename "$(dirname "${_ckpt_dir}")")"             # 14B_4gpu_640P_0507
+OUT_DIR="${OUT_DIR:-${PROJECT_ROOT}/infer_out/${_run_tag}/ckpt${_ckpt_step}-g${GUIDANCE_SCALE}}"
 
 # Model-size-specific pretrained-Wan defaults (mirror train.sh)
 case "${MODEL_SIZE}" in
@@ -92,7 +98,7 @@ python -m view_transfer_via_query.infer \
     --src_idx               "${SRC_IDX}" \
     --tgt_idx               "${TGT_IDX}" \
     $([ -n "${DUAL_PROJECTION}" ] && echo "--dual_projection") \
-    $([ -n "${USE_MESH}" ] && echo "--use_mesh") \
+    $([ "${USE_MESH}" = "1" ] && echo "--use_mesh" || echo "--no-use_mesh") \
     --dit_ckpt              "${DIT_CKPT}" \
     --vae_ckpt              "${VAE_CKPT}" \
     --lora_ckpt             "${LORA_CKPT}" \

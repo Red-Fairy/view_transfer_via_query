@@ -22,3 +22,12 @@ DIFFSYNTH_ROOT="$(cd "${PROJECT_ROOT}/.." && pwd)"
 
 export PROJECT_ROOT DIFFSYNTH_ROOT
 export PYTHONPATH="${DIFFSYNTH_ROOT}:${PYTHONPATH:-}"
+
+# DeltaAI / Cray: xpmem module sets LD_LIBRARY_PATH but not LIBRARY_PATH/CPATH,
+# so DeepSpeed JIT-compiled ops (which link against cray-mpich → -lxpmem) fail
+# at link time with "cannot find -lxpmem". Add compile-time paths if present.
+if [ -d /opt/xpmem/lib64 ]; then
+    export LIBRARY_PATH="/opt/xpmem/lib64${LIBRARY_PATH:+:$LIBRARY_PATH}"
+    export LD_LIBRARY_PATH="/opt/xpmem/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    export CPATH="/opt/xpmem/include${CPATH:+:$CPATH}"
+fi

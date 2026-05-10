@@ -21,6 +21,7 @@ import os
 import sys
 import torch
 from typing import Dict, Optional
+from tqdm.auto import tqdm
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 from diffsynth.diffusion.flow_match import FlowMatchScheduler
@@ -102,6 +103,8 @@ class ViewTransferPipeline:
         guidance_scale: float = 5.0,
         return_latent: bool = False,
         verbose: bool = False,
+        progress: bool = True,
+        progress_desc: Optional[str] = None,
     ) -> torch.Tensor:
         """Generate target perspective video.
 
@@ -152,7 +155,11 @@ class ViewTransferPipeline:
 
         # 5. Sampling loop with CFG
         model = self.model
-        for i, t in enumerate(timesteps):
+        pbar = tqdm(
+            timesteps, desc=progress_desc or "denoising",
+            disable=not progress, dynamic_ncols=True, leave=False,
+        )
+        for i, t in enumerate(pbar):
             t_batch = t.float().unsqueeze(0).expand(B)
             v_cond = model(noisy_latent=z, timestep=t_batch, **cond)
             if guidance_scale != 1.0:
@@ -162,8 +169,10 @@ class ViewTransferPipeline:
                 v = v_cond
             # scheduler.step internally promotes via float32 sigma; restore model dtype
             z = self.scheduler.step(v, t, z).to(model_dtype)
+            sigma = float(self.scheduler.sigmas[i])
+            pbar.set_postfix(sigma=f"{sigma:.3f}")
             if verbose and (i % max(1, num_inference_steps // 10) == 0):
-                print(f"step {i}/{num_inference_steps}  sigma={self.scheduler.sigmas[i].item():.4f}")
+                tqdm.write(f"step {i}/{num_inference_steps}  sigma={sigma:.4f}")
 
         if return_latent:
             return z
