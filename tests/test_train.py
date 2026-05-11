@@ -14,7 +14,7 @@ import pytest
 
 from diffsynth.diffusion.flow_match import FlowMatchScheduler
 from view_transfer_via_query.model import ViewTransferConfig, ViewTransferDiT, apply_lora
-from view_transfer_via_query.train import apply_cfg_dropout, training_step
+from view_transfer_via_query.train import apply_cfg_dropout, training_step, save_trainable
 
 
 # ── Fixtures ──
@@ -112,6 +112,39 @@ def test_training_step_backward(model, cfg):
     # Check LoRA grads exist
     block0_q = model.blocks[0].self_attn.q
     assert block0_q.lora_A.weight.grad is not None
+
+
+# ── save_trainable ──
+
+def test_save_trainable_lora_filters_to_prefixes(model, tmp_path):
+    """LoRA mode (default) keeps only LoRA + new-module keys."""
+    model.freeze_base()
+    apply_lora(model, rank=4, alpha=4.0)
+    out = tmp_path / "trainable.pt"
+    save_trainable(model, str(out), full=False)
+    sd = torch.load(str(out), map_location="cpu", weights_only=True)
+    assert len(sd) > 0
+    # No base/frozen Wan keys leak through.
+    for k in sd:
+        assert (
+            "lora_" in k
+            or "plucker_encoder" in k
+            or "patch_embed_source" in k
+            or "geoada_" in k
+            or "cross_attn_src" in k
+        ), f"unexpected key in LoRA save: {k}"
+
+
+def test_save_trainable_full_dumps_entire_state_dict(model, tmp_path):
+    """full=True must persist every parameter so a full-finetune run can be reloaded."""
+    out = tmp_path / "trainable_full.pt"
+    save_trainable(model, str(out), full=True)
+    sd = torch.load(str(out), map_location="cpu", weights_only=True)
+    full_keys = set(model.state_dict().keys())
+    assert set(sd.keys()) == full_keys, (
+        f"full save dropped keys: missing={full_keys - set(sd.keys())}  "
+        f"extra={set(sd.keys()) - full_keys}"
+    )
 
 
 if __name__ == "__main__":

@@ -52,14 +52,20 @@ def encode_video_to_latent(
     video: torch.Tensor,
     device: str = "cuda",
     tiled: bool = False,
+    keep_on_device: bool = False,
 ) -> torch.Tensor:
     """Encode one perspective video → latent.
 
     Args:
         video: [T, 3, H, W] in [0, 1] (float / bf16 / fp16). Cast to the VAE's own dtype
                so callers can run a bf16 VAE without manually matching dtypes.
+        keep_on_device: when True, return the latent on `device` instead of CPU. The
+            online training/inference path sets this to avoid a D2H+H2D round trip
+            per stream. Offline encoders leave the default (False) so on-disk
+            shards are written from CPU as before.
     Returns:
-        latent: [16, T_lat, H_lat, W_lat] CPU tensor (VAE-normalized space)
+        latent: [16, T_lat, H_lat, W_lat] tensor (VAE-normalized space). On CPU when
+                keep_on_device is False (default), on `device` otherwise.
     """
     assert video.dim() == 4 and video.shape[1] == 3, f"Expected [T,3,H,W], got {video.shape}"
     vae_dtype = next(vae.model.parameters()).dtype
@@ -67,7 +73,8 @@ def encode_video_to_latent(
     x = video.permute(1, 0, 2, 3).contiguous().to(dtype=vae_dtype)
     x = x * 2.0 - 1.0
     latents = vae.encode([x], device=device, tiled=tiled)  # [1, 16, T_lat, H_lat, W_lat]
-    return latents[0].cpu()
+    out = latents[0]
+    return out if keep_on_device else out.cpu()
 
 
 @torch.no_grad()

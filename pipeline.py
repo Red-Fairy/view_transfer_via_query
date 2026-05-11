@@ -31,6 +31,21 @@ from .gpu_preprocess import gpu_preprocess
 from .prepare_data.encode_latents import load_wan_vae
 
 
+def _vram_advance_modules(model: torch.nn.Module, target: str):
+    """Walk every AutoWrapped* layer in `model` and call its `target` method
+    (e.g. "onload" or "offload"). No-op on plain modules.
+
+    Mirrors `BasePipeline.load_models_to_device` from diffsynth — needed because
+    we don't subclass that base class but still want the same staged state
+    transitions: state 0 (offloaded) → 1 (onloaded) so per-forward `vram_limit`
+    pinning to GPU can fire.
+    """
+    for m in model.modules():
+        fn = getattr(m, target, None)
+        if callable(fn) and hasattr(m, "state"):
+            fn()
+
+
 # ── Pipeline ────────────────────────────────────────────────────────────────
 
 
@@ -47,6 +62,7 @@ class ViewTransferPipeline:
         pers_w: int = 832,
         use_mesh: bool = False,
         mesh_face_res: int = 1024,
+        low_vram: bool = False,
     ):
         self.model = model.eval()
         self.vae = vae
@@ -56,6 +72,7 @@ class ViewTransferPipeline:
         self.pers_w = pers_w
         self.use_mesh = use_mesh
         self.mesh_face_res = mesh_face_res
+        self.low_vram = low_vram
 
     @classmethod
     def from_pretrained(
@@ -125,11 +142,19 @@ class ViewTransferPipeline:
         # Pop target if accidentally provided — inference doesn't use it
         cpu_batch = {k: v for k, v in cpu_batch.items() if k != "rgb_tgt_360"}
 
+        if self.low_vram:
+            # Bring VAE to onload state (DiT to offloaded) so the encode runs
+            # without DiT weights pinned on GPU.
+            _vram_advance_modules(self.model, "offload")
+            _vram_advance_modules(self.vae, "onload")
+            torch.cuda.empty_cache()
+
         # 1. Preprocess (skips target encoding because rgb_tgt_360 absent)
         cond = gpu_preprocess(
             cpu_batch, vae=self.vae, device=self.device,
             pers_h=self.pers_h, pers_w=self.pers_w,
             use_mesh=self.use_mesh, mesh_face_res=self.mesh_face_res,
+            tiled_vae=self.low_vram,
         )
         if "target_latent" in cond:
             cond.pop("target_latent")
@@ -145,6 +170,12 @@ class ViewTransferPipeline:
         ref = cond["source_latent"]
         B = ref.shape[0]
         z = torch.randn_like(ref)
+
+        if self.low_vram:
+            # VAE is done; bring DiT in for the denoising loop.
+            _vram_advance_modules(self.vae, "offload")
+            _vram_advance_modules(self.model, "onload")
+            torch.cuda.empty_cache()
 
         # 3. Scheduler timesteps for inference
         self.scheduler.set_timesteps(num_inference_steps=num_inference_steps, training=False)
@@ -177,8 +208,27 @@ class ViewTransferPipeline:
         if return_latent:
             return z
 
+        if self.low_vram:
+            # Swap DiT off, VAE on for decode.
+            _vram_advance_modules(self.model, "offload")
+            _vram_advance_modules(self.vae, "onload")
+            torch.cuda.empty_cache()
+
         # 6. VAE decode → [B, 3, T_video, H, W] in [-1, 1]
-        latents = [z[b].float() for b in range(B)]
-        videos = self.vae.decode(latents, device=self.device)
+        # `vae_dtype` matches whatever the VAE was loaded as: fp32 in the default
+        # path, bf16 in the low-VRAM path. WanVideoVAE.decode copies its input
+        # to CPU internally regardless, so fuse the device move and dtype cast
+        # CPU-side: this copies bf16 across PCIe and upcasts on CPU instead of
+        # promoting to fp32 on GPU first (half the bytes transferred). `tiled`
+        # is only needed in the low-VRAM path to cap decode peak memory.
+        vae_dtype = next(self.vae.parameters()).dtype
+        latents = [z[b].detach().to(device="cpu", dtype=vae_dtype) for b in range(B)]
+        videos = self.vae.decode(latents, device=self.device, tiled=self.low_vram)
         videos = ((videos + 1.0) * 127.5).clamp(0, 255).to(torch.uint8)
+
+        if self.low_vram:
+            # Swap DiT back in for the next sample's denoise loop.
+            _vram_advance_modules(self.vae, "offload")
+            _vram_advance_modules(self.model, "onload")
+            torch.cuda.empty_cache()
         return videos.cpu()

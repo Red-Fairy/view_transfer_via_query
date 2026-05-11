@@ -339,8 +339,13 @@ _TRAINABLE_KEY_PREFIXES = (
 )
 
 
-def save_trainable(model, save_path):
-    """Filter state_dict to LoRA + new modules and write a single .pt for inference.
+def save_trainable(model, save_path, full: bool = False):
+    """Write a single .pt for inference.
+
+    full=False (LoRA mode, default): filter to LoRA + new modules only.
+    full=True  (full finetune):      dump the entire state_dict. Required when
+                                     args.lora_rank == 0, otherwise the main DiT
+                                     blocks' trained weights would be silently dropped.
 
     Under ZeRO-2 model params are NOT partitioned across ranks (only optimizer state is),
     so unwrapping the model and reading state_dict on rank 0 returns full bf16 params.
@@ -348,9 +353,12 @@ def save_trainable(model, save_path):
     only ship the ZeRO-2 path today.
     """
     state = model.state_dict()
-    out = {k: v.detach().to("cpu")
-           for k, v in state.items()
-           if any(t in k for t in _TRAINABLE_KEY_PREFIXES)}
+    if full:
+        out = {k: v.detach().to("cpu") for k, v in state.items()}
+    else:
+        out = {k: v.detach().to("cpu")
+               for k, v in state.items()
+               if any(t in k for t in _TRAINABLE_KEY_PREFIXES)}
     torch.save(out, save_path)
 
 
@@ -381,10 +389,6 @@ def main():
         args.seed = int.from_bytes(os.urandom(4), "little")
     set_seed(args.seed)
 
-    # save the args to a json file
-    with open(os.path.join(args.output_dir, "args.json"), "w") as f:
-        json.dump(args.__dict__, f, indent=2)
-
     # All distributed config (mixed_precision, deepspeed_plugin, num_processes, …) is
     # routed through accelerate's --config_file YAML, which references our DS JSON.
     # We still cast the input batch to bf16 manually inside the loop because
@@ -399,6 +403,10 @@ def main():
 
     device = accelerator.device
     if accelerator.is_main_process:
+        # Direct invocation (without scripts/train.sh) may not have created the dir.
+        os.makedirs(args.output_dir, exist_ok=True)
+        with open(os.path.join(args.output_dir, "args.json"), "w") as f:
+            json.dump(args.__dict__, f, indent=2)
         print(f"Random seed = {args.seed}  (use --seed {args.seed} to reproduce)")
 
     # 1. Load DiT (LoRA or full) ------------------------------------------------
@@ -682,6 +690,7 @@ def main():
                     save_trainable(
                         accelerator.unwrap_model(model),
                         os.path.join(save_dir, "trainable_params.pt"),
+                        full=(args.lora_rank == 0),
                     )
                     _save_step_marker(save_dir, global_step)
                     tqdm.write(f"[step {global_step}] saved checkpoint → {save_dir}")

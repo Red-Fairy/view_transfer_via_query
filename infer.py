@@ -39,10 +39,19 @@ import imageio.v2 as imageio
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 from safetensors.torch import load_file as load_safetensors
 
-from view_transfer_via_query.model import MODEL_CONFIGS, ViewTransferDiT, apply_lora
+from view_transfer_via_query.model import (
+    MODEL_CONFIGS, ViewTransferDiT, ViewTransferDiTBlock, AdapterDiTBlock, apply_lora,
+)
 from view_transfer_via_query.dataset import SampleEntry, load_locations_file, collate_view_transfer
 from view_transfer_via_query.pipeline import ViewTransferPipeline
 from view_transfer_via_query.prepare_data.encode_latents import load_wan_vae
+
+from diffsynth.core.vram.layers import (
+    enable_vram_management, AutoWrappedLinear, AutoWrappedModule,
+    AutoWrappedNonRecurseModule,
+)
+from diffsynth.models.wan_video_dit import RMSNorm as WanRMSNorm
+from diffsynth.models.wan_video_vae import RMS_norm as VAE_RMS_norm, CausalConv3d, Upsample
 from view_transfer_via_query.prepare_data.video_io import load_png_sequence
 from view_transfer_via_query.prepare_data.extract_perspectives import (
     sample_perspective_trajectory,
@@ -237,10 +246,15 @@ def save_info_json(path: Path, sample: Dict, args: argparse.Namespace):
     path.write_text(json.dumps(info, indent=2))
 
 
-def folder_name(sample: Dict) -> str:
-    """<scene>__<location>__src{X}tgt{Y}_t{t0}"""
+def folder_name(sample: Dict, k_suffix: Optional[int] = None) -> str:
+    """<scene>__<location>__src{X}tgt{Y}_t{t0}[_k{k}]
+
+    `k_suffix` is appended only when caller asks (i.e. num_per_location > 1), so
+    single-sample runs keep their original folder names (resume paths unchanged).
+    """
     loc = Path(sample["location_dir"])
-    return f"{loc.parent.name}__{loc.name}__src{sample['src_idx']}tgt{sample['tgt_idx']}_t{int(sample['t_offset'])}"
+    base = f"{loc.parent.name}__{loc.name}__src{sample['src_idx']}tgt{sample['tgt_idx']}_t{int(sample['t_offset'])}"
+    return f"{base}_k{k_suffix}" if k_suffix is not None else base
 
 
 # ── 2x3 grid stitch (writes grid.mp4 next to the 6 per-sample mp4s) ─────────
@@ -300,11 +314,13 @@ def render_and_save(
     sample: Dict, pipe: ViewTransferPipeline, out_dir: Path,
     pers_h: int, pers_w: int, fps: int, num_inference_steps: int, guidance_scale: float,
     device: torch.device, args: argparse.Namespace,
-):
-    sample_dir = out_dir / folder_name(sample)
+    k_suffix: Optional[int] = None,
+) -> bool:
+    """Returns True if a new render was written, False if a prior pred.mp4 was reused."""
+    sample_dir = out_dir / folder_name(sample, k_suffix=k_suffix)
     if sample_dir.exists() and (sample_dir / "pred.mp4").exists():
         print(f"  [skip] {sample_dir.name} (pred.mp4 exists)")
-        return
+        return False
 
     # 1. Model prediction
     batch = collate_view_transfer([sample])
@@ -346,6 +362,7 @@ def render_and_save(
     save_info_json(sample_dir / "info.json", sample, args)
     make_grid_video(sample_dir, fps)
     print(f"  [done] {sample_dir.name}")
+    return True
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
@@ -379,12 +396,21 @@ def parse_args():
                         "nvdiffrast (with backface culling) instead of point-cloud "
                         "scatter. ON by default for inference; pass --no-use_mesh to "
                         "fall back to the point-cloud path.")
+    p.add_argument("--low_vram", action="store_true", default=False,
+                   help="Opt in to per-layer CPU↔GPU offload (DiffSynth's "
+                        "enable_vram_management) + tiled VAE encode/decode + "
+                        "DiT/VAE swap at encode/denoise/decode boundaries. "
+                        "Required for single-GPU inference of 14B + LoRA on a "
+                        "48 GB A6000; adds ~20-30%% latency on 80 GB cards. "
+                        "When unset, runs the original eager-residency path.")
 
     p.add_argument("--min_overlap", type=float, default=0.25,
                    help="minimum first-frame frustum overlap between src/tgt (0 = unconstrained)")
     p.add_argument("--fps", type=int, default=16)
     p.add_argument("--device", default="cuda")
     p.add_argument("--dtype", default="bfloat16", choices=["float32", "bfloat16", "float16"])
+    p.add_argument("--process_id", default=0, type=int)
+    p.add_argument("--num_processes", default=1, type=int)
     return p.parse_args()
 
 
@@ -397,9 +423,15 @@ def build_pipeline(args, device: torch.device) -> ViewTransferPipeline:
     del state_dict
 
     if args.lora_ckpt is not None:
-        print(f"[infer] applying LoRA rank={args.lora_rank} from {args.lora_ckpt}")
-        apply_lora(model, rank=args.lora_rank, alpha=args.lora_alpha)
         trainable_state = torch.load(args.lora_ckpt, map_location="cpu", weights_only=True)
+        # Auto-detect: LoRA checkpoints contain `lora_A.weight` / `lora_B.weight`.
+        # Full-finetune checkpoints (written when --lora_rank=0) do not.
+        is_lora = any("lora_" in k for k in trainable_state)
+        if is_lora:
+            print(f"[infer] applying LoRA rank={args.lora_rank} from {args.lora_ckpt}")
+            apply_lora(model, rank=args.lora_rank, alpha=args.lora_alpha)
+        else:
+            print(f"[infer] loading full-finetune weights from {args.lora_ckpt}")
         missing, unexpected = model.load_state_dict(trainable_state, strict=False)
         n_ckpt = len(trainable_state)
         n_loaded = n_ckpt - len(unexpected)
@@ -407,14 +439,68 @@ def build_pipeline(args, device: torch.device) -> ViewTransferPipeline:
         if unexpected:
             print(f"  WARN: {len(unexpected)} unexpected keys (first 5): {unexpected[:5]}")
 
-    model.to(device=device, dtype=dtype).eval()
-    print(f"[infer] loading VAE: {args.vae_ckpt}")
-    vae = load_wan_vae(args.vae_ckpt, device=str(device), dtype=torch.float32)
+    if args.low_vram:
+        # Low-VRAM path: model stays on CPU; enable_vram_management demand-pages
+        # weights onto GPU per-layer during forward. Normalize all params to the
+        # target dtype on CPU first (newly-initialized adapter, plücker, and
+        # LoRA tensors default to fp32; pretrained `.copy_(bf16)` into fp32
+        # slots also stays fp32). Without this, `next(model.parameters()).dtype`
+        # would report fp32 and the patch-embedding conv would see input/weight
+        # dtype mismatches.
+        model.to(dtype=dtype).eval()
+        print(f"[infer] loading VAE: {args.vae_ckpt}")
+        vae = load_wan_vae(args.vae_ckpt, device="cpu", dtype=dtype)
+
+        free_gb = torch.cuda.mem_get_info(device)[0] / (1024 ** 3)
+        vram_limit = max(free_gb - 4.0, 8.0)
+        vram_config = {
+            "offload_dtype": dtype,
+            "offload_device": "cpu",
+            "onload_dtype": dtype,
+            "onload_device": "cpu",
+            "preparing_dtype": dtype,
+            "preparing_device": str(device),
+            "computation_dtype": dtype,
+            "computation_device": str(device),
+        }
+        print(f"[infer] enabling VRAM management (vram_limit={vram_limit:.1f} GB, dtype={dtype})")
+        enable_vram_management(
+            model,
+            module_map={
+                torch.nn.Linear: AutoWrappedLinear,
+                torch.nn.Conv3d: AutoWrappedModule,
+                torch.nn.LayerNorm: AutoWrappedModule,
+                WanRMSNorm: AutoWrappedModule,
+                ViewTransferDiTBlock: AutoWrappedNonRecurseModule,
+                AdapterDiTBlock: AutoWrappedNonRecurseModule,
+            },
+            vram_config=vram_config,
+            vram_limit=vram_limit,
+        )
+        enable_vram_management(
+            vae,
+            module_map={
+                torch.nn.Linear: AutoWrappedLinear,
+                torch.nn.Conv2d: AutoWrappedModule,
+                VAE_RMS_norm: AutoWrappedModule,
+                CausalConv3d: AutoWrappedModule,
+                Upsample: AutoWrappedModule,
+            },
+            vram_config=vram_config,
+            vram_limit=vram_limit,
+        )
+    else:
+        # Original path: full DiT resident on GPU at `dtype`; fp32 VAE.
+        model.to(device=device, dtype=dtype).eval()
+        print(f"[infer] loading VAE: {args.vae_ckpt}")
+        vae = load_wan_vae(args.vae_ckpt, device=str(device), dtype=torch.float32)
+
     scheduler = FlowMatchScheduler(template="Wan")
     return ViewTransferPipeline(
         model=model, vae=vae, scheduler=scheduler, device=device,
         pers_h=args.pers_h, pers_w=args.pers_w,
         use_mesh=args.use_mesh,
+        low_vram=args.low_vram,
     )
 
 
@@ -425,10 +511,13 @@ def main():
     locations = load_locations_file(args.locations_file)
     print(f"[infer] {len(locations)} locations from {args.locations_file}")
 
+    locations = locations[args.process_id::args.num_processes]
+    print(f"[infer] {len(locations)} locations for process {args.process_id}/{args.num_processes}")
+
     pipe = build_pipeline(args, device)
     out_dir = Path(args.out_dir)
 
-    n_done = n_skipped = 0
+    n_done = n_skipped = n_skipped_existing = 0
     for loc in locations:
         # Direction A entry (src=A, tgt=B)
         entry_a = SampleEntry(location_dir=loc, src_idx=args.src_idx, tgt_idx=args.tgt_idx)
@@ -454,8 +543,12 @@ def main():
             continue
         t_max = T_full - args.num_video_frames
 
+        # One RNG per location (was per-k → duplicate t0 draws collided on folder name).
+        rng = np.random.default_rng()
+        # Only stamp `k` into folder names when there are multiple draws — preserves
+        # original folder names (and resume paths) for the common single-sample case.
+        k_suffix_fn = (lambda k: k) if args.num_per_location > 1 else (lambda k: None)
         for k in range(args.num_per_location):
-            rng = np.random.default_rng()
             t0 = int(rng.integers(0, t_max + 1))
 
             # Load static depth at t0 for depth-based overlap estimation (diff-camera)
@@ -481,24 +574,34 @@ def main():
 
             sample_a = build_sample(entry_a, t0, args.num_video_frames, traj_a, traj_b)
             print(f"[gen] {Path(loc).name}  src={entry_a.src_idx} tgt={entry_a.tgt_idx}  t0={t0}  ({k+1}/{args.num_per_location})")
-            render_and_save(
+            if render_and_save(
                 sample_a, pipe, out_dir, args.pers_h, args.pers_w, args.fps,
                 args.num_inference_steps, args.guidance_scale, device, args,
-            )
-            n_done += 1
+                k_suffix=k_suffix_fn(k),
+            ):
+                n_done += 1
+            else:
+                n_skipped_existing += 1
 
             if args.dual_projection:
                 # Same t0; swap pairing AND swap trajectories so the source perspective
                 # in B equals the target perspective in A (and vice versa).
                 sample_b = build_sample(entry_b, t0, args.num_video_frames, traj_b, traj_a)
                 print(f"[gen] {Path(loc).name}  src={entry_b.src_idx} tgt={entry_b.tgt_idx}  t0={t0}  (dual)")
-                render_and_save(
+                if render_and_save(
                     sample_b, pipe, out_dir, args.pers_h, args.pers_w, args.fps,
                     args.num_inference_steps, args.guidance_scale, device, args,
-                )
-                n_done += 1
+                    k_suffix=k_suffix_fn(k),
+                ):
+                    n_done += 1
+                else:
+                    n_skipped_existing += 1
 
-    print(f"\n[infer] done.  generated={n_done}  skipped_locations={n_skipped}  out_dir={out_dir}")
+    print(
+        f"\n[infer] done.  generated={n_done}  "
+        f"skipped_existing={n_skipped_existing}  skipped_locations={n_skipped}  "
+        f"out_dir={out_dir}"
+    )
 
 
 if __name__ == "__main__":

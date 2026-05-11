@@ -64,6 +64,7 @@ def gpu_preprocess(
     return_videos: bool = False,
     use_mesh: bool = False,
     mesh_face_res: int = 1024,
+    tiled_vae: bool = False,
 ) -> Dict:
     """One step of online preprocessing. Returns a dict ready for the model.
 
@@ -144,11 +145,16 @@ def gpu_preprocess(
     # so the conv ops don't trip on a dtype mismatch.
     vae_dtype = next(vae.model.parameters()).dtype
     def _encode_batch(pers_videos: torch.Tensor) -> torch.Tensor:
+        # keep_on_device=True skips encode_video_to_latent's `.cpu()` and our
+        # trailing `.to(device)`. Saves one D2H+H2D round-trip per stream per batch.
+        # (WanVideoVAE.encode still copies its *input* to CPU internally — out of scope.)
         latents = []
         for b in range(B):
             video_btchw = pers_videos[b].permute(1, 0, 2, 3).contiguous().to(dtype=vae_dtype)
-            latents.append(encode_video_to_latent(vae, video_btchw, device=device))
-        return torch.stack(latents, dim=0).to(device)
+            latents.append(encode_video_to_latent(
+                vae, video_btchw, device=device, tiled=tiled_vae, keep_on_device=True,
+            ))
+        return torch.stack(latents, dim=0)
 
     with record_function("preprocess.vae_encode"):
         source_latent = _encode_batch(src_pers)

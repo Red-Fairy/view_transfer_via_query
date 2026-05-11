@@ -13,6 +13,10 @@
 #   DUAL_PROJECTION     "1" to enable         (default unset)
 #   PERS_H / PERS_W     int                   (default 368 / 640 — matches recommended training)
 #   NUM_VIDEO_FRAMES    int                   (default 81)
+#   LOW_VRAM            "1" to enable         (default unset — opts in to per-layer
+#                                              CPU↔GPU offload + tiled VAE; required
+#                                              for 14B + LoRA on a 48 GB A6000;
+#                                              ~20-30%% slower on 80 GB cards)
 #
 #   LOCATIONS_FILE      path to .txt          (default train_locations_v2.txt)
 #   OUT_DIR             path                  (default ${PROJECT_ROOT}/infer_out/<run_tag>)
@@ -23,6 +27,8 @@
 #   bash scripts/infer.sh
 #   GUIDANCE_SCALE=2.5 bash scripts/infer.sh
 #   LORA_CKPT=runs/exp/checkpoint-2000/trainable_params.pt OUT_DIR=infer_out/exp-2k bash scripts/infer.sh
+
+# LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libstdc++.so.6 for unicorn cluster
 set -euo pipefail
 
 source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
@@ -32,12 +38,18 @@ MODEL_SIZE="${MODEL_SIZE:-14B}"
 LORA_RANK="${LORA_RANK:-64}"
 LORA_ALPHA="${LORA_ALPHA:-64.0}"
 NUM_INFERENCE_STEPS="${NUM_INFERENCE_STEPS:-25}"
-GUIDANCE_SCALE="${GUIDANCE_SCALE:-1.0}"
+GUIDANCE_SCALE="${GUIDANCE_SCALE:-2.5}"
 NUM_PER_LOCATION="${NUM_PER_LOCATION:-1}"
 SRC_IDX="${SRC_IDX:-00}"
 TGT_IDX="${TGT_IDX:-01}"
+# Pad single-digit input ("0" → "00") so users can pass either form.
+[ ${#SRC_IDX} -eq 1 ] && SRC_IDX="0${SRC_IDX}"
+[ ${#TGT_IDX} -eq 1 ] && TGT_IDX="0${TGT_IDX}"
 DUAL_PROJECTION="${DUAL_PROJECTION:-}"   # set to any non-empty value to enable
 USE_MESH="${USE_MESH:-1}"                 # 1 = cubemap-mesh lift+render (default); set to 0/empty to fall back to point-cloud
+LOW_VRAM="${LOW_VRAM:-}"                  # set to any non-empty value to enable per-layer offload + tiled VAE
+NUM_PROCESSES="${NUM_PROCESSES:-1}"
+PROCESS_ID="${PROCESS_ID:-0}"
 
 # Resolution must match what the model was trained at (defaults assume the
 # recommended production config in scripts/train.sh).
@@ -48,7 +60,7 @@ NUM_VIDEO_FRAMES="${NUM_VIDEO_FRAMES:-81}"
 LOCATIONS_FILE="${LOCATIONS_FILE:-/work/nvme/beab/rluo2/viewpoint-transfer/data/split_files/test.txt}"
 
 # Auto-tag the output directory by checkpoint step + guidance scale, unless overridden.
-LORA_CKPT="${LORA_CKPT:-${PROJECT_ROOT}/runs/14B_4gpu_640P_0507/checkpoint-2000/trainable_params.pt}"
+LORA_CKPT="${LORA_CKPT:-${PROJECT_ROOT}/runs/14B_4gpu_640P_0507/checkpoint-5600/trainable_params.pt}"
 
 # Derive OUT_DIR from LORA_CKPT path:
 #   <PROJECT_ROOT>/runs/<run_tag>/checkpoint-<step>/trainable_params.pt
@@ -57,7 +69,9 @@ _ckpt_dir="$(dirname "${LORA_CKPT}")"                          # …/checkpoint-
 _ckpt_basename="$(basename "${_ckpt_dir}")"                    # checkpoint-1600
 _ckpt_step="${_ckpt_basename#checkpoint-}"                     # 1600
 _run_tag="$(basename "$(dirname "${_ckpt_dir}")")"             # 14B_4gpu_640P_0507
-OUT_DIR="${OUT_DIR:-${PROJECT_ROOT}/infer_out/${_run_tag}/ckpt${_ckpt_step}-g${GUIDANCE_SCALE}}"
+_pairing_tag="same"
+[ "${SRC_IDX}" != "${TGT_IDX}" ] && _pairing_tag="diff"
+OUT_DIR="${OUT_DIR:-${PROJECT_ROOT}/infer_out/${_run_tag}/ckpt${_ckpt_step}_${_pairing_tag}_g${GUIDANCE_SCALE}}"
 
 # Model-size-specific pretrained-Wan defaults (mirror train.sh)
 case "${MODEL_SIZE}" in
@@ -89,6 +103,7 @@ echo "  NUM_PER_LOCATION    = ${NUM_PER_LOCATION}"
 echo "  SRC/TGT_IDX         = ${SRC_IDX} / ${TGT_IDX}"
 echo "  RES                 = ${PERS_H}x${PERS_W}x${NUM_VIDEO_FRAMES}"
 [ -n "${DUAL_PROJECTION}" ] && echo "  DUAL_PROJECTION     = on"
+[ -n "${LOW_VRAM}" ] && echo "  LOW_VRAM            = on"
 echo "==================================================================="
 
 python -m view_transfer_via_query.infer \
@@ -98,6 +113,7 @@ python -m view_transfer_via_query.infer \
     --src_idx               "${SRC_IDX}" \
     --tgt_idx               "${TGT_IDX}" \
     $([ -n "${DUAL_PROJECTION}" ] && echo "--dual_projection") \
+    $([ -n "${LOW_VRAM}" ] && echo "--low_vram") \
     $([ "${USE_MESH}" = "1" ] && echo "--use_mesh" || echo "--no-use_mesh") \
     --dit_ckpt              "${DIT_CKPT}" \
     --vae_ckpt              "${VAE_CKPT}" \
@@ -109,4 +125,6 @@ python -m view_transfer_via_query.infer \
     --guidance_scale        "${GUIDANCE_SCALE}" \
     --pers_h                "${PERS_H}" \
     --pers_w                "${PERS_W}" \
-    --num_video_frames      "${NUM_VIDEO_FRAMES}"
+    --num_video_frames      "${NUM_VIDEO_FRAMES}" \
+    --process_id            "${PROCESS_ID}" \
+    --num_processes         "${NUM_PROCESSES}" 

@@ -300,7 +300,7 @@ class ViewTransferDataset(Dataset):
         # Single source-static frame at t0 (RGB + radial depth)
         static_rgb_t0 = load_png_sequence(
             entry.static_rgb_dir, start=t0, num_frames=1, return_dtype=torch.uint8,
-        )[0].permute(0, 1, 2)  # [3, He, We]
+        )[0]  # [3, He, We]
 
         depth_files = _list_files(entry.static_depth_dir, exts=(".exr", ".npy", ".pt", ".pth"))
         if t0 >= len(depth_files):
