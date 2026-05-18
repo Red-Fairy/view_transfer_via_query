@@ -37,8 +37,20 @@ source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 MODEL_SIZE="${MODEL_SIZE:-14B}"
 LORA_RANK="${LORA_RANK:-64}"
 LORA_ALPHA="${LORA_ALPHA:-64.0}"
-NUM_INFERENCE_STEPS="${NUM_INFERENCE_STEPS:-25}"
-GUIDANCE_SCALE="${GUIDANCE_SCALE:-2.5}"
+NUM_INFERENCE_STEPS="${NUM_INFERENCE_STEPS:-50}"
+GUIDANCE_SCALE="${GUIDANCE_SCALE:-3}"
+# Grouped (chained) guidance: set ALL THREE to enable; leave unset for monolithic.
+GUIDANCE_GEOM="${GUIDANCE_GEOM:-}"
+GUIDANCE_SRC="${GUIDANCE_SRC:-}"
+GUIDANCE_TEXT="${GUIDANCE_TEXT:-}"
+GROUPED=""
+if [ -n "${GUIDANCE_GEOM}" ] || [ -n "${GUIDANCE_SRC}" ] || [ -n "${GUIDANCE_TEXT}" ]; then
+  if [ -z "${GUIDANCE_GEOM}" ] || [ -z "${GUIDANCE_SRC}" ] || [ -z "${GUIDANCE_TEXT}" ]; then
+    echo "ERROR: grouped guidance needs all of GUIDANCE_GEOM/GUIDANCE_SRC/GUIDANCE_TEXT" >&2
+    exit 1
+  fi
+  GROUPED=1
+fi
 NUM_PER_LOCATION="${NUM_PER_LOCATION:-1}"
 SRC_IDX="${SRC_IDX:-00}"
 TGT_IDX="${TGT_IDX:-01}"
@@ -50,6 +62,8 @@ USE_MESH="${USE_MESH:-1}"                 # 1 = cubemap-mesh lift+render (defaul
 LOW_VRAM="${LOW_VRAM:-}"                  # set to any non-empty value to enable per-layer offload + tiled VAE
 NUM_PROCESSES="${NUM_PROCESSES:-1}"
 PROCESS_ID="${PROCESS_ID:-0}"
+SEED="${SEED:-}"   # set to an int so multiple runs draw identical samples per
+                   # location (required for a comparable guidance sweep)
 
 # Resolution must match what the model was trained at (defaults assume the
 # recommended production config in scripts/train.sh).
@@ -60,7 +74,7 @@ NUM_VIDEO_FRAMES="${NUM_VIDEO_FRAMES:-81}"
 LOCATIONS_FILE="${LOCATIONS_FILE:-/work/nvme/beab/rluo2/viewpoint-transfer/data/split_files/test.txt}"
 
 # Auto-tag the output directory by checkpoint step + guidance scale, unless overridden.
-LORA_CKPT="${LORA_CKPT:-${PROJECT_ROOT}/runs/14B_4gpu_640P_0507/checkpoint-5600/trainable_params.pt}"
+LORA_CKPT="${LORA_CKPT:-${PROJECT_ROOT}/runs/14B_4gpu_640P_0507/checkpoint-10000/trainable_params.pt}"
 
 # Derive OUT_DIR from LORA_CKPT path:
 #   <PROJECT_ROOT>/runs/<run_tag>/checkpoint-<step>/trainable_params.pt
@@ -71,7 +85,12 @@ _ckpt_step="${_ckpt_basename#checkpoint-}"                     # 1600
 _run_tag="$(basename "$(dirname "${_ckpt_dir}")")"             # 14B_4gpu_640P_0507
 _pairing_tag="same"
 [ "${SRC_IDX}" != "${TGT_IDX}" ] && _pairing_tag="diff"
-OUT_DIR="${OUT_DIR:-${PROJECT_ROOT}/infer_out/${_run_tag}/ckpt${_ckpt_step}_${_pairing_tag}_g${GUIDANCE_SCALE}}"
+if [ -n "${GROUPED}" ]; then
+  _g_tag="geom${GUIDANCE_GEOM}_src${GUIDANCE_SRC}_text${GUIDANCE_TEXT}"
+else
+  _g_tag="g${GUIDANCE_SCALE}"
+fi
+OUT_DIR="${OUT_DIR:-${PROJECT_ROOT}/infer_out/${_run_tag}/ckpt${_ckpt_step}_${_pairing_tag}_${_g_tag}}"
 
 # Model-size-specific pretrained-Wan defaults (mirror train.sh)
 case "${MODEL_SIZE}" in
@@ -98,7 +117,11 @@ echo "  LORA_CKPT           = ${LORA_CKPT}"
 echo "  LOCATIONS_FILE      = ${LOCATIONS_FILE}"
 echo "  OUT_DIR             = ${OUT_DIR}"
 echo "  NUM_INFERENCE_STEPS = ${NUM_INFERENCE_STEPS}"
-echo "  GUIDANCE_SCALE      = ${GUIDANCE_SCALE}"
+if [ -n "${GROUPED}" ]; then
+  echo "  GUIDANCE (grouped)  = geom=${GUIDANCE_GEOM} src=${GUIDANCE_SRC} text=${GUIDANCE_TEXT}"
+else
+  echo "  GUIDANCE_SCALE      = ${GUIDANCE_SCALE}"
+fi
 echo "  NUM_PER_LOCATION    = ${NUM_PER_LOCATION}"
 echo "  SRC/TGT_IDX         = ${SRC_IDX} / ${TGT_IDX}"
 echo "  RES                 = ${PERS_H}x${PERS_W}x${NUM_VIDEO_FRAMES}"
@@ -123,8 +146,10 @@ python -m view_transfer_via_query.infer \
     --lora_alpha            "${LORA_ALPHA}" \
     --num_inference_steps   "${NUM_INFERENCE_STEPS}" \
     --guidance_scale        "${GUIDANCE_SCALE}" \
+    $([ -n "${GROUPED}" ] && echo "--guidance_geom ${GUIDANCE_GEOM} --guidance_src ${GUIDANCE_SRC} --guidance_text ${GUIDANCE_TEXT}") \
     --pers_h                "${PERS_H}" \
     --pers_w                "${PERS_W}" \
     --num_video_frames      "${NUM_VIDEO_FRAMES}" \
     --process_id            "${PROCESS_ID}" \
-    --num_processes         "${NUM_PROCESSES}" 
+    --num_processes         "${NUM_PROCESSES}" \
+    $([ -n "${SEED}" ] && echo "--seed ${SEED}")

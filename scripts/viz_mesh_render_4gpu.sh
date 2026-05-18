@@ -5,7 +5,9 @@
 
 set -e
 
-DATA_ROOT="${DATA_ROOT:-/share/ma/scratch/rundong/Unreal_Projects/outputs_arranged}"
+# Source selection: prefer LOCATIONS_FILE (matches dataset.py); fall back to DATA_ROOT walk.
+LOCATIONS_FILE="${LOCATIONS_FILE:-/share/ma/scratch/rundong/Unreal_Projects/split_files/view_transfer_0507/train.txt}"
+DATA_ROOT="${DATA_ROOT:-}"
 OUT_DIR="${OUT_DIR:-/home/rl897/viewpoint-transfer/wan/DiffSynth-Studio/view_transfer_via_query/viz_mesh_render}"
 PYTHON="${PYTHON:-/home/rl897/anaconda3/envs/wan-view-transfer/bin/python}"
 NUM_SAME="${NUM_SAME:-50}"
@@ -20,8 +22,16 @@ PERS_W="${PERS_W:-832}"
 MESH_FACE_RES="${MESH_FACE_RES:-1024}"
 SRC_IDX="${SRC_IDX:-00}"
 TGT_IDX="${TGT_IDX:-01}"
+MIN_OVERLAP="${MIN_OVERLAP:-0.25}"
 SEED="${SEED:-0}"
 N=4
+
+# Pick exactly one source flag for the python invocation.
+if [[ -n "$DATA_ROOT" ]]; then
+  SRC_FLAGS=(--data_root "$DATA_ROOT")
+else
+  SRC_FLAGS=(--locations_file "$LOCATIONS_FILE")
+fi
 
 # nvdiffrast's C++ ext needs GLIBCXX_3.4.32; the conda env's libstdc++.so.6 only
 # provides up to 3.4.29, so preload the system libstdc++ for these subprocesses.
@@ -36,7 +46,7 @@ for i in $(seq 0 $((N-1))); do
   CUDA_VISIBLE_DEVICES=$i \
   LD_PRELOAD="$SYS_LIBSTDCPP" \
   $PYTHON -m view_transfer_via_query.tools.viz_mesh_render \
-    --data_root    "$DATA_ROOT" \
+    "${SRC_FLAGS[@]}" \
     --out_dir      "$OUT_DIR" \
     --num_same     "$NUM_SAME" --num_diff "$NUM_DIFF" \
     --num_frames   "$NUM_FRAMES" \
@@ -45,6 +55,7 @@ for i in $(seq 0 $((N-1))); do
     --pers_h       "$PERS_H" --pers_w "$PERS_W" \
     --mesh_face_res "$MESH_FACE_RES" \
     --src_idx      "$SRC_IDX" --tgt_idx "$TGT_IDX" \
+    --min_overlap  "$MIN_OVERLAP" \
     --seed         "$SEED" \
     --num_shards   $N --shard_idx $i \
     > "$OUT_DIR/shard_${i}.log" 2>&1 &

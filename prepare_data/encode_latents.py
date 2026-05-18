@@ -74,7 +74,11 @@ def encode_video_to_latent(
     x = x * 2.0 - 1.0
     latents = vae.encode([x], device=device, tiled=tiled)  # [1, 16, T_lat, H_lat, W_lat]
     out = latents[0]
-    return out if keep_on_device else out.cpu()
+    # WanVideoVAE.tiled_encode hardcodes data_device="cpu" — it returns CPU
+    # tensors even when the VAE itself lives on `device`. Force the move on
+    # the keep_on_device branch so the online path (training + low-VRAM
+    # inference) sees a GPU latent regardless of `tiled`.
+    return out.to(device) if keep_on_device else out.cpu()
 
 
 @torch.no_grad()

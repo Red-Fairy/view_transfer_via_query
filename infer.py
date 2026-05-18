@@ -25,6 +25,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -52,17 +53,15 @@ from diffsynth.core.vram.layers import (
 )
 from diffsynth.models.wan_video_dit import RMSNorm as WanRMSNorm
 from diffsynth.models.wan_video_vae import RMS_norm as VAE_RMS_norm, CausalConv3d, Upsample
-from view_transfer_via_query.prepare_data.video_io import load_png_sequence
+from view_transfer_via_query.prepare_data.video_io import load_png_sequence, natural_sort_key
 from view_transfer_via_query.prepare_data.extract_perspectives import (
     sample_perspective_trajectory,
     sample_trajectory_pair,
     yaw_pitch_roll_to_R,
     equi_to_perspective_video,
-    compose_perspective_c2w,
-    fov_to_intrinsics,
 )
 from view_transfer_via_query.prepare_data.lift_and_render import (
-    load_depth, load_depth_ue, lift_and_render,
+    load_depth, load_depth_ue,
 )
 
 from diffsynth.diffusion.flow_match import FlowMatchScheduler
@@ -86,11 +85,29 @@ def load_dit_state_dict(ckpt_path: str) -> dict:
     return torch.load(ckpt_path, map_location="cpu", weights_only=True)
 
 
+def make_location_rng(seed: Optional[int], loc) -> np.random.Generator:
+    """Per-location RNG. With `seed` set, the stream is fully determined by
+    (seed, location path) — so independent runs (e.g. every config in a
+    guidance sweep) draw IDENTICAL (t0, src/tgt trajectories) for a given
+    location, regardless of location order or --num_processes sharding.
+    `seed=None` → fresh nondeterministic draw (original behaviour).
+    """
+    if seed is None:
+        return np.random.default_rng()
+    loc_h = int(hashlib.md5(str(loc).encode()).hexdigest()[:16], 16)
+    return np.random.default_rng([seed, loc_h])
+
+
 # ── Sample loading (parameterized: explicit pairing + explicit trajectories) ─
 
 
 def _list_files(dir_path: str, exts: tuple) -> List[str]:
-    fs = sorted(f for f in os.listdir(dir_path) if f.lower().endswith(exts))
+    # Natural sort: keep depth-frame order consistent with list_png_frames'
+    # RGB order so `depth_files[t0]` matches the RGB frame at index t0.
+    fs = sorted(
+        (f for f in os.listdir(dir_path) if f.lower().endswith(exts)),
+        key=natural_sort_key,
+    )
     return [os.path.join(dir_path, f) for f in fs]
 
 
@@ -183,32 +200,6 @@ def extract_pers_pixel(
     return _to_uint8_video(pers_f)
 
 
-def render_warp_visibility(
-    static_rgb_uint8: torch.Tensor,  # [3, He, We]
-    static_depth: torch.Tensor,      # [He, We] meters (NaN = sky)
-    src_c2w_at_t0: torch.Tensor,
-    pano_c2w_tgt: torch.Tensor,
-    tgt_yaw_deg: torch.Tensor, tgt_pitch_deg: torch.Tensor, tgt_roll_deg: torch.Tensor,
-    fov_h_deg: float, pers_h: int, pers_w: int, device: torch.device,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Returns (rendered_uint8 [T,3,h,w], visibility_uint8 [T,3,h,w])."""
-    rgb_b = static_rgb_uint8.to(device).float() / 255.0
-    depth_b = static_depth.to(device).float()
-    tgt_R = yaw_pitch_roll_to_R(tgt_yaw_deg, tgt_pitch_deg, tgt_roll_deg).to(device)
-    tgt_pers_c2w = compose_perspective_c2w(pano_c2w_tgt.to(device), tgt_R)
-    fx, fy, cx, cy = fov_to_intrinsics(fov_h_deg, pers_h, pers_w)
-    K = torch.tensor([fx, fy, cx, cy], device=device, dtype=torch.float32)
-    rendered, vis = lift_and_render(
-        static_rgb=rgb_b, static_depth=depth_b,
-        pano_c2w_at_t0=src_c2w_at_t0.to(device),
-        target_c2w=tgt_pers_c2w, intrinsics=K,
-        pers_h=pers_h, pers_w=pers_w,
-    )
-    rendered_u8 = _to_uint8_video(rendered)
-    vis_u8 = (vis.expand(-1, 3, -1, -1) * 255.0).clamp(0, 255).to(torch.uint8).cpu()
-    return rendered_u8, vis_u8
-
-
 # ── Saving ───────────────────────────────────────────────────────────────────
 
 
@@ -241,6 +232,10 @@ def save_info_json(path: Path, sample: Dict, args: argparse.Namespace):
         "pano_c2w_tgt_first": sample["pano_c2w_tgt"][0].tolist(),
         "num_inference_steps": args.num_inference_steps,
         "guidance_scale": args.guidance_scale,
+        "guidance_geom": args.guidance_geom,
+        "guidance_src": args.guidance_src,
+        "guidance_text": args.guidance_text,
+        "seed": args.seed,
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(info, indent=2))
@@ -325,11 +320,17 @@ def render_and_save(
     # 1. Model prediction
     batch = collate_view_transfer([sample])
     batch_no_gt = {k: v for k, v in batch.items() if k != "rgb_tgt_360"}
-    pred = pipe.generate(
+    pred_batch, cond_videos = pipe.generate(
         batch_no_gt, num_inference_steps=num_inference_steps,
-        guidance_scale=guidance_scale, verbose=False,
+        guidance_scale=guidance_scale,
+        guidance_geom=args.guidance_geom,
+        guidance_src=args.guidance_src,
+        guidance_text=args.guidance_text,
+        return_cond_videos=True,
+        verbose=False,
         progress_desc=f"gen {sample_dir.name}",
-    )[0]  # [3, T, H, W] uint8 cpu
+    )
+    pred = pred_batch[0]  # [3, T, H, W] uint8 cpu
 
     # 2. Pixel-space conditions (no VAE round-trip)
     src_pers = extract_pers_pixel(
@@ -344,12 +345,12 @@ def render_and_save(
         sample["blob_360"], sample["tgt_yaw_deg"], sample["tgt_pitch_deg"], sample["tgt_roll_deg"],
         sample["tgt_fov_h_deg"], pers_h, pers_w, device,
     )
-    rendered_pers, visibility_pers = render_warp_visibility(
-        sample["static_rgb_t0"], sample["static_depth_t0"],
-        sample["src_c2w_at_t0"], sample["pano_c2w_tgt"],
-        sample["tgt_yaw_deg"], sample["tgt_pitch_deg"], sample["tgt_roll_deg"],
-        sample["tgt_fov_h_deg"], pers_h, pers_w, device,
-    )
+    # Rendered / visibility: the exact pre-VAE conditioning the pipeline fed the
+    # model (returned by generate(return_cond_videos=True)) — no separate
+    # re-render, so these can never drift from what the model actually saw.
+    rendered_pers = cond_videos["rendered"][0].permute(1, 0, 2, 3)        # [T,3,H,W]
+    visibility_pers = cond_videos["mask_vis"][0].expand(3, -1, -1, -1) \
+        .permute(1, 0, 2, 3)                                              # [T,3,H,W]
 
     # 3. Save
     sample_dir.mkdir(parents=True, exist_ok=True)
@@ -387,7 +388,17 @@ def parse_args():
     p.add_argument("--model_size", type=str, default="14B", choices=list(MODEL_CONFIGS.keys()))
 
     p.add_argument("--num_inference_steps", type=int, default=50)
-    p.add_argument("--guidance_scale", type=float, default=5.0)
+    p.add_argument("--guidance_scale", type=float, default=5.0,
+                   help="Monolithic CFG scale (used when grouped guidance is off).")
+    p.add_argument("--guidance_geom", type=float, default=None,
+                   help="Grouped-guidance weight for geom={plucker_tgt,rendered,"
+                        "mask,blob}. Set --guidance_geom/--guidance_src/--guidance_text "
+                        "together to enable chained grouped guidance "
+                        "(4 forwards/step instead of 2).")
+    p.add_argument("--guidance_src", type=float, default=None,
+                   help="Grouped-guidance weight for src={source_latent,plucker_src}.")
+    p.add_argument("--guidance_text", type=float, default=None,
+                   help="Grouped-guidance weight for text={text_emb}.")
     p.add_argument("--num_video_frames", type=int, default=81)
     p.add_argument("--pers_h", type=int, default=480)
     p.add_argument("--pers_w", type=int, default=832)
@@ -411,6 +422,11 @@ def parse_args():
     p.add_argument("--dtype", default="bfloat16", choices=["float32", "bfloat16", "float16"])
     p.add_argument("--process_id", default=0, type=int)
     p.add_argument("--num_processes", default=1, type=int)
+    p.add_argument("--seed", type=int, default=None,
+                   help="Seed for the per-location RNG (t0 + src/tgt trajectory "
+                        "sampling). Set this so multiple runs (e.g. a guidance "
+                        "sweep) draw IDENTICAL samples per location and are "
+                        "comparable. None = fresh nondeterministic draw.")
     return p.parse_args()
 
 
@@ -441,12 +457,7 @@ def build_pipeline(args, device: torch.device) -> ViewTransferPipeline:
 
     if args.low_vram:
         # Low-VRAM path: model stays on CPU; enable_vram_management demand-pages
-        # weights onto GPU per-layer during forward. Normalize all params to the
-        # target dtype on CPU first (newly-initialized adapter, plücker, and
-        # LoRA tensors default to fp32; pretrained `.copy_(bf16)` into fp32
-        # slots also stays fp32). Without this, `next(model.parameters()).dtype`
-        # would report fp32 and the patch-embedding conv would see input/weight
-        # dtype mismatches.
+        # weights onto GPU per-layer during forward.
         model.to(dtype=dtype).eval()
         print(f"[infer] loading VAE: {args.vae_ckpt}")
         vae = load_wan_vae(args.vae_ckpt, device="cpu", dtype=dtype)
@@ -544,7 +555,11 @@ def main():
         t_max = T_full - args.num_video_frames
 
         # One RNG per location (was per-k → duplicate t0 draws collided on folder name).
-        rng = np.random.default_rng()
+        # When --seed is set, derive the per-location seed from (seed, stable hash
+        # of the location path) so every run draws IDENTICAL (t0, trajectories)
+        # for a given location regardless of location order / --num_processes
+        # sharding — required for a comparable guidance sweep.
+        rng = make_location_rng(args.seed, loc)
         # Only stamp `k` into folder names when there are multiple draws — preserves
         # original folder names (and resume paths) for the common single-sample case.
         k_suffix_fn = (lambda k: k) if args.num_per_location > 1 else (lambda k: None)
@@ -556,8 +571,11 @@ def main():
             depth_for_overlap = None
             if pairing_a == "diff":
                 from .prepare_data.lift_and_render import load_depth_ue as _ldu, load_depth as _ld
-                _dfiles = sorted(f for f in os.listdir(entry_a.static_depth_dir)
-                                 if f.lower().endswith((".exr", ".npy", ".pt", ".pth")))
+                _dfiles = sorted(
+                    (f for f in os.listdir(entry_a.static_depth_dir)
+                     if f.lower().endswith((".exr", ".npy", ".pt", ".pth"))),
+                    key=natural_sort_key,
+                )
                 if t0 < len(_dfiles):
                     _dp = os.path.join(entry_a.static_depth_dir, _dfiles[t0])
                     depth_for_overlap = torch.from_numpy(

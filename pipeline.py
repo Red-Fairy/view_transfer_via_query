@@ -20,7 +20,7 @@ from __future__ import annotations
 import os
 import sys
 import torch
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 from tqdm.auto import tqdm
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
@@ -106,10 +106,27 @@ class ViewTransferPipeline:
 
         return cls(model=model, vae=vae, scheduler=scheduler, device=device)
 
+    # Grouped-guidance stream membership. The model is trained with independent
+    # per-stream CFG dropout (train.apply_cfg_dropout), so each group can carry
+    # its own guidance weight at inference. Levels are nested: geom ⊂ geom+src ⊂ full.
+    _GEOM_STREAMS = ("plucker_tgt", "rendered_latent", "mask_packed", "blob_latent")
+    _SRC_STREAMS = ("source_latent", "plucker_src")
+    # text_emb is the only remaining stream; it's whatever `cond` has that the
+    # two groups above don't claim, so we don't need to enumerate it.
+
     @staticmethod
     def _build_uncond(cond: Dict) -> Dict:
         """Zero-out every conditioning stream for the unconditional pass."""
         return {k: torch.zeros_like(v) for k, v in cond.items()}
+
+    @staticmethod
+    def _subset_cond(cond: Dict, active_keys) -> Dict:
+        """Keep `active_keys` as-is; zero every other stream (same shape/dtype)."""
+        active = set(active_keys)
+        return {
+            k: (v if k in active else torch.zeros_like(v))
+            for k, v in cond.items()
+        }
 
     @torch.no_grad()
     def generate(
@@ -118,11 +135,15 @@ class ViewTransferPipeline:
         *,
         num_inference_steps: int = 50,
         guidance_scale: float = 5.0,
+        guidance_geom: Optional[float] = None,
+        guidance_src: Optional[float] = None,
+        guidance_text: Optional[float] = None,
         return_latent: bool = False,
+        return_cond_videos: bool = False,
         verbose: bool = False,
         progress: bool = True,
         progress_desc: Optional[str] = None,
-    ) -> torch.Tensor:
+    ) -> "torch.Tensor | Tuple[torch.Tensor, Dict[str, torch.Tensor]]":
         """Generate target perspective video.
 
         Args:
@@ -132,12 +153,30 @@ class ViewTransferPipeline:
                        pano_c2w_src, pano_c2w_tgt, src_c2w_at_t0, text_emb,
                        src_*_deg, tgt_*_deg.
             num_inference_steps: number of denoising steps (typically 30-100).
-            guidance_scale: CFG scale; 1.0 = no guidance, 5.0 = standard.
+            guidance_scale: monolithic CFG scale; 1.0 = no guidance, 5.0 = standard.
+                            Used only when grouped guidance is not requested.
+            guidance_geom/guidance_src/guidance_text: grouped (chained) guidance
+                weights. Pass ALL THREE to enable grouped mode; leave all None to
+                use monolithic `guidance_scale`. With nested levels
+                uncond ⊂ geom ⊂ geom+src ⊂ full, the velocity is
+                  v = v_uncond
+                      + w_geom·(v_geom    − v_uncond)
+                      + w_src ·(v_geomsrc − v_geom)
+                      + w_text·(v_full    − v_geomsrc)
+                geom = {plucker_tgt, rendered_latent, mask_packed, blob_latent},
+                src  = {source_latent, plucker_src}, text = {text_emb}.
+                Costs 4 model forwards/step vs 2 for monolithic CFG.
             return_latent: if True, return predicted latent instead of decoded video.
+            return_cond_videos: if True, also return the exact pre-VAE conditioning
+                streams the model was built from, so callers can save faithful
+                inspection videos without re-rendering.
 
         Returns:
             videos: [B, 3, T_video, pers_h, pers_w] uint8 in [0, 255], OR
                     if return_latent=True, [B, 16, T_lat, H_lat, W_lat] float32.
+            If return_cond_videos=True, returns a tuple
+            (videos_or_latent, {"rendered": [B,3,T,H,W] uint8,
+                                "mask_vis": [B,1,T,H,W] uint8}) — both cpu.
         """
         # Pop target if accidentally provided — inference doesn't use it
         cpu_batch = {k: v for k, v in cpu_batch.items() if k != "rgb_tgt_360"}
@@ -150,20 +189,36 @@ class ViewTransferPipeline:
             torch.cuda.empty_cache()
 
         # 1. Preprocess (skips target encoding because rgb_tgt_360 absent)
-        cond = gpu_preprocess(
+        pp = gpu_preprocess(
             cpu_batch, vae=self.vae, device=self.device,
             pers_h=self.pers_h, pers_w=self.pers_w,
             use_mesh=self.use_mesh, mesh_face_res=self.mesh_face_res,
             tiled_vae=self.low_vram,
+            return_videos=return_cond_videos,
         )
-        if "target_latent" in cond:
-            cond.pop("target_latent")
 
+        cond_videos: Optional[Dict[str, torch.Tensor]] = None
+        if return_cond_videos:
+            # The exact pre-VAE conditioning pixels the model was built from —
+            # single source of truth, no separate re-render. Move to CPU now so
+            # they don't pin GPU memory through the denoise loop (matters under
+            # --low_vram); uint8, so cheap to hold.
+            cond_videos = {
+                "rendered": pp["videos_rendered"].cpu(),
+                "mask_vis": pp["mask_vis"].cpu(),
+            }
+
+        # Keep only the keys the DiT forward consumes (return_videos and the
+        # non-inference target_latent must not leak into the **cond splat).
+        _MODEL_COND_KEYS = (
+            "source_latent", "rendered_latent", "blob_latent", "mask_packed",
+            "plucker_src", "plucker_tgt", "text_emb",
+        )
         # Cast all floating tensors to model dtype (gpu_preprocess outputs fp32)
         model_dtype = next(self.model.parameters()).dtype
         cond = {
-            k: (v.to(model_dtype) if torch.is_floating_point(v) else v)
-            for k, v in cond.items()
+            k: (pp[k].to(model_dtype) if torch.is_floating_point(pp[k]) else pp[k])
+            for k in _MODEL_COND_KEYS
         }
 
         # 2. Init noise at target latent shape (matches source_latent shape)
@@ -181,8 +236,21 @@ class ViewTransferPipeline:
         self.scheduler.set_timesteps(num_inference_steps=num_inference_steps, training=False)
         timesteps = self.scheduler.timesteps.to(self.device)
 
-        # 4. Unconditional batch (zeros)
+        # 4. Build the guidance levels.
+        grouped = any(g is not None for g in (guidance_geom, guidance_src, guidance_text))
+        if grouped and any(g is None for g in (guidance_geom, guidance_src, guidance_text)):
+            raise ValueError(
+                "grouped guidance needs all three of guidance_geom/src/text set "
+                f"(got geom={guidance_geom}, src={guidance_src}, text={guidance_text})"
+            )
+
         uncond = self._build_uncond(cond)
+        if grouped:
+            # Nested levels: uncond ⊂ geom ⊂ geom+src ⊂ full(=cond).
+            cond_geom = self._subset_cond(cond, self._GEOM_STREAMS)
+            cond_geomsrc = self._subset_cond(
+                cond, self._GEOM_STREAMS + self._SRC_STREAMS
+            )
 
         # 5. Sampling loop with CFG
         model = self.model
@@ -192,12 +260,24 @@ class ViewTransferPipeline:
         )
         for i, t in enumerate(pbar):
             t_batch = t.float().unsqueeze(0).expand(B)
-            v_cond = model(noisy_latent=z, timestep=t_batch, **cond)
-            if guidance_scale != 1.0:
+            if grouped:
                 v_uncond = model(noisy_latent=z, timestep=t_batch, **uncond)
-                v = v_uncond + guidance_scale * (v_cond - v_uncond)
+                v_geom = model(noisy_latent=z, timestep=t_batch, **cond_geom)
+                v_geomsrc = model(noisy_latent=z, timestep=t_batch, **cond_geomsrc)
+                v_full = model(noisy_latent=z, timestep=t_batch, **cond)
+                v = (
+                    v_uncond
+                    + guidance_geom * (v_geom - v_uncond)
+                    + guidance_src * (v_geomsrc - v_geom)
+                    + guidance_text * (v_full - v_geomsrc)
+                )
             else:
-                v = v_cond
+                v_cond = model(noisy_latent=z, timestep=t_batch, **cond)
+                if guidance_scale != 1.0:
+                    v_uncond = model(noisy_latent=z, timestep=t_batch, **uncond)
+                    v = v_uncond + guidance_scale * (v_cond - v_uncond)
+                else:
+                    v = v_cond
             # scheduler.step internally promotes via float32 sigma; restore model dtype
             z = self.scheduler.step(v, t, z).to(model_dtype)
             sigma = float(self.scheduler.sigmas[i])
@@ -206,7 +286,7 @@ class ViewTransferPipeline:
                 tqdm.write(f"step {i}/{num_inference_steps}  sigma={sigma:.4f}")
 
         if return_latent:
-            return z
+            return (z, cond_videos) if return_cond_videos else z
 
         if self.low_vram:
             # Swap DiT off, VAE on for decode.
@@ -231,4 +311,5 @@ class ViewTransferPipeline:
             _vram_advance_modules(self.vae, "offload")
             _vram_advance_modules(self.model, "onload")
             torch.cuda.empty_cache()
-        return videos.cpu()
+        out = videos.cpu()
+        return (out, cond_videos) if return_cond_videos else out

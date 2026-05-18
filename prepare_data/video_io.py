@@ -5,16 +5,35 @@ Loads PNG frame sequences (the primary format on disk) or MP4 files and returns
 """
 
 import os
+import re
 import cv2
 import numpy as np
 import torch
 from typing import List, Optional
 
 
+def natural_sort_key(name: str):
+    """Sort key that orders embedded integer runs numerically, not lexically.
+
+    Plain `str.sort()` orders `frame_10.png` before `frame_2.png`, silently
+    shuffling a frame sequence whenever filenames aren't fixed-width zero-padded.
+    This key splits the basename into digit / non-digit runs and compares digit
+    runs as ints, so `frame_2 < frame_10`. It is a no-op (same order) for the
+    already-zero-padded UE renders, so existing data is unaffected.
+
+    The split structure is identical across all files following one naming
+    pattern (the case for a frame/depth sequence directory), so int-vs-str
+    position clashes don't arise in practice.
+    """
+    base = os.path.basename(name)
+    return [int(tok) if tok.isdigit() else tok.lower()
+            for tok in re.split(r"(\d+)", base)]
+
+
 def list_png_frames(dir_path: str) -> List[str]:
-    """Sorted list of PNG paths in a directory."""
+    """Natural-sorted list of PNG paths in a directory."""
     files = [f for f in os.listdir(dir_path) if f.lower().endswith((".png", ".jpg", ".jpeg"))]
-    files.sort()
+    files.sort(key=natural_sort_key)
     return [os.path.join(dir_path, f) for f in files]
 
 
@@ -33,6 +52,11 @@ def load_png_sequence(
     if num_frames is None:
         num_frames = (len(paths) - start) // stride
     indices = [start + i * stride for i in range(num_frames)]
+    if not indices:
+        raise ValueError(
+            f"Empty frame window (start={start}, num_frames={num_frames}, "
+            f"stride={stride}, available={len(paths)}): {dir_path}"
+        )
     if max(indices) >= len(paths):
         raise IndexError(
             f"Need frame {max(indices)} but dir has only {len(paths)}: {dir_path}"

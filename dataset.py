@@ -32,7 +32,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .prepare_data.video_io import load_png_sequence
+from .prepare_data.video_io import load_png_sequence, natural_sort_key
 from .prepare_data.extract_perspectives import sample_perspective_trajectory, sample_trajectory_pair
 from .prepare_data.lift_and_render import load_depth, load_depth_ue
 
@@ -216,7 +216,12 @@ def load_locations_file(path: str) -> List[str]:
 
 
 def _list_files(dir_path: str, exts: tuple) -> List[str]:
-    files = sorted([f for f in os.listdir(dir_path) if f.lower().endswith(exts)])
+    # Natural sort so depth-frame order matches list_png_frames' RGB order:
+    # `depth_files[t0]` must be the depth for the same frame as RGB index t0.
+    files = sorted(
+        (f for f in os.listdir(dir_path) if f.lower().endswith(exts)),
+        key=natural_sort_key,
+    )
     return [os.path.join(dir_path, f) for f in files]
 
 

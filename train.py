@@ -240,6 +240,17 @@ def parse_args():
                         "(after 1 wait + 2 warmup) and dump a TB trace under <output_dir>/profiler_trace/")
     p.add_argument("--profile_shapes", action="store_true",
                    help="record op input shapes (heavier, larger trace, but useful for shape-related issues)")
+    p.add_argument("--sync_timing", action="store_true",
+                   help="Force a full torch.cuda.synchronize() around the prefetcher "
+                        "wait and the fwd/bwd/optim block so t_wait / t_compute are "
+                        "exactly attributable. This SERIALIZES the producer (side-stream "
+                        "GPU preprocess) and the consumer (fwd/bwd), defeating prefetch "
+                        "overlap — use only for bottleneck profiling. Default OFF: the "
+                        "CUDAStreamPrefetcher overlaps GPU preprocessing with fwd/bwd "
+                        "(prefetch_depth>1 becomes effective); t_wait/t_compute are then "
+                        "approximate CPU-enqueue times (near-zero t_wait = prefetcher "
+                        "hiding data prep) while t_iter remains the reliable throughput "
+                        "metric (loss.item() per step bounds CPU run-ahead).")
     return p.parse_args()
 
 
@@ -536,15 +547,23 @@ def main():
         print(f"Resuming at global_step = {global_step}")
     model.train()
 
-    # Bottleneck-discovery instrumentation:
-    #   t_wait    = wall time the consumer is blocked on the prefetcher
-    #               (zero if data pipeline is fully hiding behind compute).
-    #   t_compute = wall time of fwd + bwd + optimizer.step (cuda-synced).
-    #   t_iter    = total wall time of the iteration.
-    # Interpretation:
-    #   t_wait ≈ 0           → compute-bound (prefetcher hiding data prep).
-    #   t_wait > 0           → data-bound; raw data prep ≈ t_wait + t_compute.
-    #   t_wait ≈ t_compute   → balanced; consider --no_prefetch / sub-stage timing.
+    # Bottleneck-discovery instrumentation. Two modes:
+    #
+    #  --sync_timing (profiling, OFF by default): a full torch.cuda.synchronize()
+    #    brackets the prefetcher wait and the fwd/bwd/optim block, so:
+    #      t_wait    = wall time the consumer is blocked on the prefetcher
+    #      t_compute = wall time of fwd + bwd + optimizer.step (cuda-synced)
+    #      t_iter    = total wall time of the iteration
+    #    Interpretation: t_wait≈0 → compute-bound (prefetcher hiding data prep);
+    #    t_wait>0 → data-bound (raw prep ≈ t_wait + t_compute). NOTE this mode
+    #    SERIALIZES producer and consumer, so prefetch_depth gives no overlap.
+    #
+    #  default (no --sync_timing): the GPU preprocess runs on the side stream
+    #    concurrently with fwd/bwd, so prefetch_depth>1 is actually effective.
+    #    Without the syncs, t_wait/t_compute become approximate CPU-enqueue
+    #    times — a near-zero t_wait means the prefetcher is hiding data prep —
+    #    and t_iter is the reliable throughput metric (loss.item() in the tqdm
+    #    postfix forces one sync/step, bounding CPU run-ahead to ~1 iteration).
     is_cuda = device.type == "cuda"
     ema_wait = _EMA()
     ema_compute = _EMA()
@@ -588,9 +607,11 @@ def main():
             iter_t0 = time.perf_counter()
 
             # ── Time the wait on the prefetcher ────────────────────────────────
-            # Sync first so prior consumer work doesn't bleed into this measurement;
-            # then sync after next() to flush the producer-side wait_stream.
-            if is_cuda:
+            # With --sync_timing: sync first so prior consumer work doesn't bleed
+            # into this measurement, then sync after next() to flush the
+            # producer-side wait_stream (exact but serializing). Default: skip
+            # both so the side-stream preprocess overlaps fwd/bwd.
+            if is_cuda and args.sync_timing:
                 torch.cuda.synchronize()
             t0 = time.perf_counter()
             with record_function("wait_prefetcher"):
@@ -598,7 +619,7 @@ def main():
                     batch = next(iter_p)
                 except StopIteration:
                     break
-            if is_cuda:
+            if is_cuda and args.sync_timing:
                 torch.cuda.synchronize()
             t_wait = time.perf_counter() - t0
 
@@ -632,7 +653,7 @@ def main():
                     optimizer.step()
                     lr_scheduler.step()
                     optimizer.zero_grad()
-            if is_cuda:
+            if is_cuda and args.sync_timing:
                 torch.cuda.synchronize()
             t_compute = time.perf_counter() - t0
 

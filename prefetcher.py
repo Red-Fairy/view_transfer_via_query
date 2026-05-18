@@ -88,6 +88,29 @@ class CUDAStreamPrefetcher:
         self._try_fill()
         return self
 
+    def _record_consumer_stream(self, batch: dict) -> None:
+        """Tag every CUDA tensor in `batch` with the consumer (current) stream.
+
+        The batch tensors were allocated on `self.stream` (the side/preprocess
+        stream) but are *read* on the consumer (default) stream. PyTorch's
+        caching allocator only tracks a block's *allocation* stream: when the
+        consumer later drops its references, the allocator defers block reuse
+        only until the SIDE stream is clear — it has no record that the
+        consumer stream touched the memory. So the very next `_try_fill()`
+        can hand that block to a new preprocess while the model's fwd/bwd is
+        still reading it → intermittent, input-dependent silent corruption.
+
+        `record_stream(consumer)` tells the allocator the consumer stream also
+        used these blocks, so it will additionally wait for the consumer
+        stream to drain before reusing them. This is the standard NVIDIA
+        data-prefetcher pattern; `wait_stream` (below) only orders
+        producer→consumer and does not cover this consumer→producer reuse.
+        """
+        consumer = torch.cuda.current_stream(self.device)
+        for v in batch.values():
+            if isinstance(v, torch.Tensor) and v.is_cuda:
+                v.record_stream(consumer)
+
     def __next__(self) -> dict:
         if not self._queue:
             raise StopIteration
@@ -97,6 +120,10 @@ class CUDAStreamPrefetcher:
         if self.stream is not None:
             torch.cuda.current_stream(self.device).wait_stream(self.stream)
         batch = self._queue.popleft()
+        # Memory-safety: mark the batch as consumed on the default stream BEFORE
+        # the next `_try_fill()` can reuse its (side-stream-allocated) blocks.
+        if self.stream is not None:
+            self._record_consumer_stream(batch)
         self._try_fill()                     # refill immediately while consumer runs
         return batch
 

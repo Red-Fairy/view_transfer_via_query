@@ -39,7 +39,7 @@ LOG_VIDEO_EVERY="${LOG_VIDEO_EVERY:-0}"
 LOG_VIDEO_FPS="${LOG_VIDEO_FPS:-16}"
 PROFILE_STEPS="${PROFILE_STEPS:-0}"
 PROFILE_SHAPES="${PROFILE_SHAPES:-0}"
-USE_MESH="${USE_MESH:-}"        # set to any non-empty value to use cubemap-mesh lift+render
+USE_MESH="${USE_MESH:-1}"       # cubemap-mesh lift+render (default ON, matches infer.sh); set USE_MESH= (empty) for point-cloud
 TRAIN_DTYPE="${TRAIN_DTYPE:-bf16}"
 DATA_DTYPE="${DATA_DTYPE:-bf16}"
 

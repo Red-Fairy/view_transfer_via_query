@@ -35,6 +35,15 @@ H_LAT, W_LAT = PERS_H // 8, PERS_W // 8
 class _StubVAE:
     """Mimics WanVideoVAE.encode / decode contracts with the right shapes."""
 
+    def __init__(self):
+        # gpu_preprocess / encode_video_to_latent read `vae.model.parameters()`
+        # for the VAE dtype; expose a trivial module so the contract holds.
+        self.model = torch.nn.Linear(1, 1)
+
+    def parameters(self):
+        # pipeline.generate's decode path reads `self.vae.parameters()` dtype.
+        return self.model.parameters()
+
     def encode(self, videos, device, tiled=False):
         # videos: list of [3, T, H, W] in [-1, 1]
         out = []
@@ -156,6 +165,53 @@ def test_cfg_scale_changes_output(pipeline, cfg):
     torch.manual_seed(0)
     z2 = pipeline.generate(batch, num_inference_steps=3, guidance_scale=5.0, return_latent=True)
     assert not torch.allclose(z1, z2, atol=1e-4)
+
+
+def test_subset_cond_zeros_inactive_only():
+    cond = {
+        "source_latent": torch.randn(2, 16, 5, 8, 8),
+        "plucker_src": torch.randn(2, 6, 5, 8, 8),
+        "text_emb": torch.randn(2, 4, 256),
+    }
+    sub = ViewTransferPipeline._subset_cond(cond, ("source_latent",))
+    assert torch.equal(sub["source_latent"], cond["source_latent"])
+    assert sub["plucker_src"].abs().sum() == 0
+    assert sub["text_emb"].abs().sum() == 0
+    for k in cond:  # shapes/dtypes preserved
+        assert sub[k].shape == cond[k].shape
+
+
+def test_grouped_guidance_requires_all_three(pipeline, cfg):
+    batch = _make_cpu_batch(cfg)
+    with pytest.raises(ValueError, match="all three"):
+        pipeline.generate(
+            batch, num_inference_steps=2, return_latent=True,
+            guidance_geom=3.0, guidance_src=1.5,  # text missing
+        )
+
+
+def test_grouped_guidance_runs_and_shape(pipeline, cfg):
+    batch = _make_cpu_batch(cfg)
+    z = pipeline.generate(
+        batch, num_inference_steps=2, return_latent=True,
+        guidance_geom=3.0, guidance_src=1.5, guidance_text=2.0,
+    )
+    assert z.shape == (B, 16, T_LAT, H_LAT, W_LAT)
+
+
+def test_grouped_differs_from_monolithic(pipeline, cfg):
+    """Grouped chained guidance should not coincide with a single-scale CFG run."""
+    batch = _make_cpu_batch(cfg)
+    torch.manual_seed(0)
+    z_mono = pipeline.generate(
+        batch, num_inference_steps=3, guidance_scale=5.0, return_latent=True,
+    )
+    torch.manual_seed(0)
+    z_grp = pipeline.generate(
+        batch, num_inference_steps=3, return_latent=True,
+        guidance_geom=4.0, guidance_src=2.0, guidance_text=1.5,
+    )
+    assert not torch.allclose(z_mono, z_grp, atol=1e-4)
 
 
 if __name__ == "__main__":
